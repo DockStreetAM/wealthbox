@@ -2,10 +2,13 @@ from json import JSONDecodeError
 import requests
 
 import importlib.metadata
-__version__ = importlib.metadata.version("wealthbox")
-
+try:
+    __version__ = importlib.metadata.version("wealthbox")  # your distribution name
+except importlib.metadata.PackageNotFoundError:
+    __version__ = "0.0.0"
 
 class WealthBox(object):
+    
     def __init__(self, token=None):
         self.token = token
         self.user_id = None
