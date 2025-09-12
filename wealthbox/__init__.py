@@ -262,14 +262,15 @@ class WealthBox(object):
            """
         if custom_fields is None:
             custom_fields = []
-        if assigned_to is None:
-            assigned_to = self.get_my_user_id()
         if linked_to is None:
             linked_to = []
         if due_date is None:
             due_date = datetime.date.today()
         # due date shoud be in JSON datetime format
         due_date = due_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        if assigned_to is None and assigned_to_team is None:
+            assigned_to = self.get_my_user_id()
 
         data = {
             'name': name,
@@ -278,6 +279,7 @@ class WealthBox(object):
             'resource_type': 'contact',
             'description': description,
             'assigned_to': assigned_to,
+            'assigned_to_team' :assigned_to_team,
             'custom_fields': custom_fields,
             'category': category,
         }
@@ -342,10 +344,14 @@ class WealthBox(object):
                 cf[name] = v
                 
         if assigned_to_team:
+            print("assigning to team")
+            print(f"team id: {assigned_to_id}")
             return self.create_task_detailed(title,due_date,description=description,
                                          linked_to=linked_to,assigned_to_team=assigned_to_id,
                                          category=category_id,custom_fields=cf)
         else:
+            print("assigning to user")
+            print(f"user id: {assigned_to_id}")
             return self.create_task_detailed(title,due_date,description=description,
                                          linked_to=linked_to,assigned_to=assigned_to_id,
                                          category=category_id,custom_fields=cf)
