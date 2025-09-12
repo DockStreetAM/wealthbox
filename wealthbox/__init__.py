@@ -145,6 +145,9 @@ class WealthBox(object):
         }
         return self.api_request('notes',params=params, extract_key='status_updates')
 
+    def get_categories(self,type):
+        return self.api_request('categories',params=params)
+
     def get_tags(self, document_type=None):
         params = {}
         if document_type:
@@ -252,7 +255,7 @@ class WealthBox(object):
         if type(wb_data) == list:
             return [self.enhance_user_info(d,user_map) for d in wb_data]
 
-    def create_task_detailed(self,name,due_date=None,description=None,linked_to=None,assigned_to=None,custom_fields=None):
+    def create_task_detailed(self,name,due_date=None,description=None,linked_to=None,assigned_to=None,category=None,custom_fields=None):
         """custom_fields is a dict for setting any custom fields
            dict([Name of Field] : [Value])
            """
@@ -275,10 +278,11 @@ class WealthBox(object):
             'description': description,
             'assigned_to': assigned_to,
             'custom_fields': custom_fields,
+            'category': category,
         }
         return self.api_post('tasks',data)
     
-    def create_task(self,title,due_date=None,description=None,linked_to=None,assigned_to=None,**kwargs):
+    def create_task(self,title,due_date=None,description=None,linked_to=None,assigned_to=None,category=,**kwargs):
         """
         A more user friendly version to create a task
         kwargs can be used to capture any custom fields
@@ -298,6 +302,9 @@ class WealthBox(object):
             user_team_map[team['name']] = team['id']
 
         assigned_to_id = user_team_map.get(assigned_to,None)
+
+        task_categories = self.get_categories('task_categories')
+        category_id = [c['id'] for c in task_categories if c['name'] == category][0]
 
         # Get the available custom fields for tasks
         custom_fields = self.get_custom_fields('Task')
@@ -327,4 +334,5 @@ class WealthBox(object):
                 cf[name] = v
                 
         return self.create_task_detailed(title,due_date,description=description,
-                                         linked_to=linked_to,assigned_to=assigned_to_id,custom_fields=cf)
+                                         linked_to=linked_to,assigned_to=assigned_to_id,
+                                         category=category_id,custom_fields=cf)
