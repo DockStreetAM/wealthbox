@@ -255,7 +255,8 @@ class WealthBox(object):
         if type(wb_data) == list:
             return [self.enhance_user_info(d,user_map) for d in wb_data]
 
-    def create_task_detailed(self,name,due_date=None,description=None,linked_to=None,assigned_to=None,category=None,custom_fields=None):
+    def create_task_detailed(self,name,due_date=None,description=None,linked_to=None,
+                             assigned_to=None,assigned_to_team=None,category=None,custom_fields=None):
         """custom_fields is a dict for setting any custom fields
            dict([Name of Field] : [Value])
            """
@@ -282,7 +283,8 @@ class WealthBox(object):
         }
         return self.api_post('tasks',data)
     
-    def create_task(self,title,due_date=None,description=None,linked_to=None,assigned_to=None,category=None,**kwargs):
+    def create_task(self,title,due_date=None,description=None,
+                    linked_to=None,assigned_to=None,category=None,**kwargs):
         """
         A more user friendly version to create a task
         kwargs can be used to capture any custom fields
@@ -302,6 +304,7 @@ class WealthBox(object):
             user_team_map[team['name']] = team['id']
 
         assigned_to_id = user_team_map.get(assigned_to,None)
+        assigned_to_team = assigned_to in [team['name'] for team in self.get_teams()]
 
         if type(category) == str:
             task_categories = self.get_categories('task_categories')
@@ -338,6 +341,11 @@ class WealthBox(object):
             if name in [f['name'] for f in custom_fields]:
                 cf[name] = v
                 
-        return self.create_task_detailed(title,due_date,description=description,
+        if assigned_to_team:
+            return self.create_task_detailed(title,due_date,description=description,
+                                         linked_to=linked_to,assigned_to_team=assigned_to_id,
+                                         category=category_id,custom_fields=cf)
+        else:
+            return self.create_task_detailed(title,due_date,description=description,
                                          linked_to=linked_to,assigned_to=assigned_to_id,
                                          category=category_id,custom_fields=cf)
