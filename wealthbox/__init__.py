@@ -303,8 +303,11 @@ class WealthBox(object):
 
         assigned_to_id = user_team_map.get(assigned_to,None)
 
-        task_categories = self.get_categories('task_categories')
-        category_id = [c['id'] for c in task_categories if c['name'] == category][0]
+        if type(category) == str:
+            task_categories = self.get_categories('task_categories')
+            category_id = [c['id'] for c in task_categories if c['name'] == category][0]
+        else:
+            category_id = category
 
         # Get the available custom fields for tasks
         custom_fields = self.get_custom_fields('Task')
