@@ -145,8 +145,8 @@ class WealthBox(object):
         }
         return self.api_request('notes',params=params, extract_key='status_updates')
 
-    def get_categories(self,type):
-        return self.api_request('categories',params=params)
+    def get_categories(self,cat_type):
+        return self.api_request(f'categories/{cat_type}')
 
     def get_tags(self, document_type=None):
         params = {}
