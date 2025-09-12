@@ -282,7 +282,7 @@ class WealthBox(object):
         }
         return self.api_post('tasks',data)
     
-    def create_task(self,title,due_date=None,description=None,linked_to=None,assigned_to=None,category=,**kwargs):
+    def create_task(self,title,due_date=None,description=None,linked_to=None,assigned_to=None,category=None,**kwargs):
         """
         A more user friendly version to create a task
         kwargs can be used to capture any custom fields
@@ -309,8 +309,7 @@ class WealthBox(object):
         else:
             category_id = category
 
-        # Get the available custom fields for tasks
-        custom_fields = self.get_custom_fields('Task')
+        
 
         # for dicts in linked_to, pull out only the id and type fields
         # attempting to handle:
@@ -327,6 +326,9 @@ class WealthBox(object):
                 else:
                     linked_to = [{'id':id,'type':'Contact'} for id in linked_to]
 
+        # Get the available custom fields for tasks
+        custom_fields = self.get_custom_fields('Task')
+        
         cf = {}
         for k,v in kwargs.items():
             # try to match kwargs to custom fields
