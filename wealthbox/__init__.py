@@ -1,5 +1,6 @@
 from json import JSONDecodeError
 import requests
+import datetime
 
 import importlib.metadata
 try:
@@ -65,9 +66,23 @@ class WealthBox(object):
         except JSONDecodeError:
             return f"Error Decoding: {res.text}"
         return res.json()
+
+    def api_post(self, endpoint, data):
+        url = self.base_url + endpoint
+        res = requests.post(url,
+                            json=data,
+                            headers={'ACCESS_TOKEN': self.token})
+        try:
+            res_json = res.json()
+        except JSONDecodeError:
+            return f"Error Decoding: {res.text}"
+        return res.json()
        
     def get_contacts(self, filters=None):
         return self.api_request('contacts',params=filters)
+
+    def get_contact_by_name(self,name):
+        return self.get_contacts({'name':name})
 
     def get_tasks(self, resource_id=None, resource_type=None, assigned_to=None, completed=None,other_filters=None):
         default_params = {
@@ -198,6 +213,9 @@ class WealthBox(object):
 
     def get_users(self):
         return self.api_request('users')
+
+    def get_teams(self):
+        return self.api_request('teams')
         
     def make_user_map(self,method="full"):
         user_list = self.get_users()
@@ -233,3 +251,80 @@ class WealthBox(object):
             return {k:self.enhance_user_info(v,user_map) for k,v in wb_data.items()}
         if type(wb_data) == list:
             return [self.enhance_user_info(d,user_map) for d in wb_data]
+
+    def create_task_detailed(self,name,due_date=None,description=None,linked_to=None,assigned_to=None,custom_fields=None):
+        """custom_fields is a dict for setting any custom fields
+           dict([Name of Field] : [Value])
+           """
+        if custom_fields is None:
+            custom_fields = []
+        if assigned_to is None:
+            assigned_to = self.get_my_user_id()
+        if linked_to is None:
+            linked_to = []
+        if due_date is None:
+            due_date = datetime.date.today()
+        # due date shoud be in JSON datetime format
+        due_date = due_date.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        data = {
+            'name': name,
+            'due_date': due_date,
+            'linked_to': linked_to,
+            'resource_type': 'contact',
+            'description': description,
+            'assigned_to': assigned_to,
+            'custom_fields': custom_fields,
+        }
+        return self.api_post('tasks',data)
+    
+    def create_task(self,title,due_date=None,description=None,linked_to=None,assigned_to=None,**kwargs):
+        """
+        A more user friendly version to create a task
+        kwargs can be used to capture any custom fields
+        due: string or datetime. If string, should be WB later type "2 days later"
+        linked_to: array of ids or a array of dicts
+        assinged_to: string name of user or team
+        """
+
+        # Get all users and teams
+        user_team_map = {}
+        for user in self.get_users():
+            # Insert full name and also first name and last
+            user_team_map[user['name']] = user['id']
+            user_team_map[user['name'].split(' ')[0]] = user['id']
+            user_team_map[user['name'].split(' ')[-1]] = user['id']
+        for team in self.get_teams():
+            user_team_map[team['name']] = team['id']
+
+        assigned_to_id = user_team_map.get(assigned_to,None)
+
+        # Get the available custom fields for tasks
+        custom_fields = self.get_custom_fields('Task')
+
+        # for dicts in linked_to, pull out only the id and type fields
+        # attempting to handle:
+        #  - a single id
+        #  - a list of ids
+        #  - a dict with id and other keys
+        #  - a list of dicts with id and other keys
+        if linked_to is not None:
+            if type(linked_to) != list:
+                linked_to = [linked_to]
+            if len(linked_to) > 0:
+                if type(linked_to[0]) == dict:
+                    linked_to = [{'id':d['id'],'type':'Contact'} for d in linked_to]
+                else:
+                    linked_to = [{'id':id,'type':'Contact'} for id in linked_to]
+
+        cf = {}
+        for k,v in kwargs.items():
+            # try to match kwargs to custom fields
+            # no vetting of values is done
+            # replace _ in k with space
+            name = k.replace('_',' ')
+            if name in [f['name'] for f in custom_fields]:
+                cf[name] = v
+                
+        return self.create_task_detailed(title,due_date,description=description,
+                                         linked_to=linked_to,assigned_to=assigned_to_id,custom_fields=cf)
