@@ -57,7 +57,7 @@ class WealthBox:
             total=max_retries,
             backoff_factor=backoff_factor,
             status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "PUT", "POST"],
+            allowed_methods=["GET", "PUT", "POST", "DELETE"],
             raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -153,7 +153,44 @@ class WealthBox:
                 response_text=res.text
             )
         return res_json
-       
+
+    def api_delete(self, endpoint: str) -> bool:
+        """Delete a resource. Returns True if successful (204 status)."""
+        url = self.base_url + endpoint
+        res = self._session.delete(url)
+        self._check_rate_limit(res)
+        if res.status_code == 204:
+            return True
+        if res.status_code == 200:
+            return True
+        try:
+            res_json = res.json()
+            raise WealthBoxAPIError(
+                f"Delete failed with status {res.status_code}",
+                response=res_json
+            )
+        except JSONDecodeError:
+            raise WealthBoxAPIError(
+                f"Delete failed with status {res.status_code}"
+            )
+
+    def api_get_single(
+        self,
+        endpoint: str
+    ) -> dict[str, Any]:
+        """Get a single resource by ID."""
+        url = self.base_url + endpoint
+        res = self._session.get(url)
+        self._check_rate_limit(res)
+        try:
+            res_json = res.json()
+        except JSONDecodeError as e:
+            raise WealthBoxResponseError(
+                f"Failed to decode JSON response: {e}",
+                response_text=res.text
+            )
+        return res_json
+
     def get_contacts(
         self, filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
@@ -161,6 +198,30 @@ class WealthBox:
 
     def get_contact_by_name(self, name: str) -> list[dict[str, Any]]:
         return self.get_contacts({'name': name})
+
+    def get_contact(self, contact_id: int) -> dict[str, Any]:
+        """Get a single contact by ID."""
+        return self.api_get_single(f'contacts/{contact_id}')
+
+    def create_contact(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new contact.
+
+        Args:
+            data: Contact data including fields like first_name, last_name,
+                  email_addresses, phone_numbers, etc.
+
+        Returns:
+            The created contact data.
+        """
+        return self.api_post('contacts', data)
+
+    def delete_contact(self, contact_id: int) -> bool:
+        """Delete a contact by ID.
+
+        Returns:
+            True if deletion was successful.
+        """
+        return self.api_delete(f'contacts/{contact_id}')
 
     def get_tasks(
         self,
@@ -187,6 +248,18 @@ class WealthBox:
 
         return self.api_request('tasks', params={**default_params, **called_params, **other_filters})
 
+    def get_task(self, task_id: int) -> dict[str, Any]:
+        """Get a single task by ID."""
+        return self.api_get_single(f'tasks/{task_id}')
+
+    def update_task(self, task_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Update a task by ID."""
+        return self.api_put(f'tasks/{task_id}', data)
+
+    def delete_task(self, task_id: int) -> bool:
+        """Delete a task by ID."""
+        return self.api_delete(f'tasks/{task_id}')
+
     def get_workflows(
         self,
         resource_id: int | None = None,
@@ -207,6 +280,37 @@ class WealthBox:
 
         return self.api_request('workflows', params={**default_params, **called_params})
 
+    def get_workflow(self, workflow_id: int) -> dict[str, Any]:
+        """Get a single workflow by ID."""
+        return self.api_get_single(f'workflows/{workflow_id}')
+
+    def create_workflow(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new workflow.
+
+        Args:
+            data: Workflow data including template_id, linked_to, etc.
+        """
+        return self.api_post('workflows', data)
+
+    def delete_workflow(self, workflow_id: int) -> bool:
+        """Delete a workflow by ID."""
+        return self.api_delete(f'workflows/{workflow_id}')
+
+    def get_workflow_templates(
+        self,
+        filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Get available workflow templates."""
+        return self.api_request('workflow_templates', params=filters)
+
+    def update_workflow_step(
+        self,
+        step_id: int,
+        data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Update a workflow step by ID."""
+        return self.api_put(f'workflow_steps/{step_id}', data)
+
     def get_events(
         self,
         resource_id: int | None = None,
@@ -218,6 +322,26 @@ class WealthBox:
         if resource_type:
             params['resource_type'] = resource_type
         return self.api_request('events', params=params)
+
+    def get_event(self, event_id: int) -> dict[str, Any]:
+        """Get a single event by ID."""
+        return self.api_get_single(f'events/{event_id}')
+
+    def create_event(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new event.
+
+        Args:
+            data: Event data including name, starts_at, ends_at, linked_to, etc.
+        """
+        return self.api_post('events', data)
+
+    def update_event(self, event_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Update an event by ID."""
+        return self.api_put(f'events/{event_id}', data)
+
+    def delete_event(self, event_id: int) -> bool:
+        """Delete an event by ID."""
+        return self.api_delete(f'events/{event_id}')
 
     def get_opportunities(
         self,
@@ -237,6 +361,30 @@ class WealthBox:
             params['include_closed'] = include_closed
         return self.api_request('opportunities', params=params)
 
+    def get_opportunity(self, opportunity_id: int) -> dict[str, Any]:
+        """Get a single opportunity by ID."""
+        return self.api_get_single(f'opportunities/{opportunity_id}')
+
+    def create_opportunity(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new opportunity.
+
+        Args:
+            data: Opportunity data including name, stage_id, linked_to, etc.
+        """
+        return self.api_post('opportunities', data)
+
+    def update_opportunity(
+        self,
+        opportunity_id: int,
+        data: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Update an opportunity by ID."""
+        return self.api_put(f'opportunities/{opportunity_id}', data)
+
+    def delete_opportunity(self, opportunity_id: int) -> bool:
+        """Delete an opportunity by ID."""
+        return self.api_delete(f'opportunities/{opportunity_id}')
+
     def get_notes(
         self,
         resource_id: int,
@@ -248,6 +396,49 @@ class WealthBox:
             'resource_type': resource_type
         }
         return self.api_request('notes', params=params, extract_key='status_updates')
+
+    def get_note(self, note_id: int) -> dict[str, Any]:
+        """Get a single note by ID."""
+        return self.api_get_single(f'notes/{note_id}')
+
+    def create_note(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new note.
+
+        Args:
+            data: Note data including content, linked_to, etc.
+        """
+        return self.api_post('notes', data)
+
+    def update_note(self, note_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Update a note by ID."""
+        return self.api_put(f'notes/{note_id}', data)
+
+    def get_projects(
+        self,
+        filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Get all projects."""
+        return self.api_request('projects', params=filters)
+
+    def get_project(self, project_id: int) -> dict[str, Any]:
+        """Get a single project by ID."""
+        return self.api_get_single(f'projects/{project_id}')
+
+    def create_project(self, data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new project.
+
+        Args:
+            data: Project data including name, linked_to, etc.
+        """
+        return self.api_post('projects', data)
+
+    def update_project(self, project_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        """Update a project by ID."""
+        return self.api_put(f'projects/{project_id}', data)
+
+    def delete_project(self, project_id: int) -> bool:
+        """Delete a project by ID."""
+        return self.api_delete(f'projects/{project_id}')
 
     def get_categories(self, cat_type: str) -> list[dict[str, Any]]:
         return self.api_request(f'categories/{cat_type}')
@@ -269,6 +460,56 @@ class WealthBox:
         if resource_type:
             params['resource_type'] = resource_type
         return self.api_request('comments', params=params)
+
+    def get_activity(
+        self,
+        filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Get activity feed."""
+        return self.api_request('activity', params=filters)
+
+    def get_contact_roles(
+        self,
+        filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Get contact roles."""
+        return self.api_request('contact_roles', params=filters)
+
+    def get_user_groups(
+        self,
+        filters: dict[str, Any] | None = None
+    ) -> list[dict[str, Any]]:
+        """Get user groups."""
+        return self.api_request('user_groups', params=filters)
+
+    def add_household_member(
+        self,
+        household_id: int,
+        contact_id: int
+    ) -> dict[str, Any]:
+        """Add a contact to a household.
+
+        Args:
+            household_id: ID of the household contact.
+            contact_id: ID of the contact to add as a member.
+        """
+        return self.api_post(
+            'household_members',
+            {'household_id': household_id, 'contact_id': contact_id}
+        )
+
+    def remove_household_member(
+        self,
+        household_id: int,
+        contact_id: int
+    ) -> bool:
+        """Remove a contact from a household.
+
+        Args:
+            household_id: ID of the household contact.
+            contact_id: ID of the contact to remove.
+        """
+        return self.api_delete(f'household_members/{household_id}/{contact_id}')
 
     def get_my_user_id(self) -> int:
         # This endpoint doesn't have a 'meta'?

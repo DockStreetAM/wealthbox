@@ -678,3 +678,533 @@ class TestGetMyUserId:
 
         assert result == 42
         assert wb.user_id == 42
+
+
+class TestApiDelete:
+    @responses.activate
+    def test_delete_success_204(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}contacts/123",
+            status=204
+        )
+
+        result = wb.api_delete("contacts/123")
+
+        assert result is True
+
+    @responses.activate
+    def test_delete_success_200(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}contacts/123",
+            status=200
+        )
+
+        result = wb.api_delete("contacts/123")
+
+        assert result is True
+
+    @responses.activate
+    def test_delete_failure(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}contacts/123",
+            json={"error": "Not found"},
+            status=404
+        )
+
+        with pytest.raises(WealthBoxAPIError) as exc_info:
+            wb.api_delete("contacts/123")
+
+        assert "Delete failed" in str(exc_info.value)
+
+    @responses.activate
+    def test_delete_rate_limit(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}contacts/123",
+            status=429,
+            headers={"Retry-After": "30"}
+        )
+
+        with pytest.raises(WealthBoxRateLimitError) as exc_info:
+            wb.api_delete("contacts/123")
+
+        assert exc_info.value.retry_after == 30
+
+
+class TestApiGetSingle:
+    @responses.activate
+    def test_get_single_success(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/123",
+            json={"id": 123, "name": "John Doe"},
+            status=200
+        )
+
+        result = wb.api_get_single("contacts/123")
+
+        assert result == {"id": 123, "name": "John Doe"}
+
+    @responses.activate
+    def test_get_single_json_error(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/123",
+            body="not json",
+            status=200
+        )
+
+        with pytest.raises(WealthBoxResponseError):
+            wb.api_get_single("contacts/123")
+
+
+class TestContactEndpoints:
+    @responses.activate
+    def test_get_contact(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/123",
+            json={"id": 123, "first_name": "John"},
+            status=200
+        )
+
+        result = wb.get_contact(123)
+
+        assert result == {"id": 123, "first_name": "John"}
+
+    @responses.activate
+    def test_create_contact(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}contacts",
+            json={"id": 456, "first_name": "Jane"},
+            status=201
+        )
+
+        result = wb.create_contact({"first_name": "Jane", "last_name": "Doe"})
+
+        assert result == {"id": 456, "first_name": "Jane"}
+
+    @responses.activate
+    def test_delete_contact(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}contacts/123",
+            status=204
+        )
+
+        result = wb.delete_contact(123)
+
+        assert result is True
+
+
+class TestTaskEndpoints:
+    @responses.activate
+    def test_get_task(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks/123",
+            json={"id": 123, "name": "Task 1"},
+            status=200
+        )
+
+        result = wb.get_task(123)
+
+        assert result == {"id": 123, "name": "Task 1"}
+
+    @responses.activate
+    def test_update_task(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}tasks/123",
+            json={"id": 123, "name": "Updated Task"},
+            status=200
+        )
+
+        result = wb.update_task(123, {"name": "Updated Task"})
+
+        assert result == {"id": 123, "name": "Updated Task"}
+
+    @responses.activate
+    def test_delete_task(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}tasks/123",
+            status=204
+        )
+
+        result = wb.delete_task(123)
+
+        assert result is True
+
+
+class TestWorkflowEndpoints:
+    @responses.activate
+    def test_get_workflow(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}workflows/123",
+            json={"id": 123, "name": "Onboarding"},
+            status=200
+        )
+
+        result = wb.get_workflow(123)
+
+        assert result == {"id": 123, "name": "Onboarding"}
+
+    @responses.activate
+    def test_create_workflow(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}workflows",
+            json={"id": 456, "name": "New Workflow"},
+            status=201
+        )
+
+        result = wb.create_workflow({"template_id": 1, "linked_to": [{"id": 100}]})
+
+        assert result == {"id": 456, "name": "New Workflow"}
+
+    @responses.activate
+    def test_delete_workflow(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}workflows/123",
+            status=204
+        )
+
+        result = wb.delete_workflow(123)
+
+        assert result is True
+
+    @responses.activate
+    def test_get_workflow_templates(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}workflow_templates",
+            json={
+                "workflow_templates": [{"id": 1, "name": "Template 1"}],
+                "meta": {"total_pages": 1}
+            },
+            status=200
+        )
+
+        result = wb.get_workflow_templates()
+
+        assert result == [{"id": 1, "name": "Template 1"}]
+
+    @responses.activate
+    def test_update_workflow_step(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}workflow_steps/123",
+            json={"id": 123, "completed": True},
+            status=200
+        )
+
+        result = wb.update_workflow_step(123, {"completed": True})
+
+        assert result == {"id": 123, "completed": True}
+
+
+class TestEventEndpoints:
+    @responses.activate
+    def test_get_event(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}events/123",
+            json={"id": 123, "name": "Meeting"},
+            status=200
+        )
+
+        result = wb.get_event(123)
+
+        assert result == {"id": 123, "name": "Meeting"}
+
+    @responses.activate
+    def test_create_event(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}events",
+            json={"id": 456, "name": "New Event"},
+            status=201
+        )
+
+        result = wb.create_event({"name": "New Event", "starts_at": "2024-01-01"})
+
+        assert result == {"id": 456, "name": "New Event"}
+
+    @responses.activate
+    def test_update_event(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}events/123",
+            json={"id": 123, "name": "Updated Event"},
+            status=200
+        )
+
+        result = wb.update_event(123, {"name": "Updated Event"})
+
+        assert result == {"id": 123, "name": "Updated Event"}
+
+    @responses.activate
+    def test_delete_event(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}events/123",
+            status=204
+        )
+
+        result = wb.delete_event(123)
+
+        assert result is True
+
+
+class TestOpportunityEndpoints:
+    @responses.activate
+    def test_get_opportunity(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities/123",
+            json={"id": 123, "name": "Deal"},
+            status=200
+        )
+
+        result = wb.get_opportunity(123)
+
+        assert result == {"id": 123, "name": "Deal"}
+
+    @responses.activate
+    def test_create_opportunity(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}opportunities",
+            json={"id": 456, "name": "New Deal"},
+            status=201
+        )
+
+        result = wb.create_opportunity({"name": "New Deal", "stage_id": 1})
+
+        assert result == {"id": 456, "name": "New Deal"}
+
+    @responses.activate
+    def test_update_opportunity(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}opportunities/123",
+            json={"id": 123, "name": "Updated Deal"},
+            status=200
+        )
+
+        result = wb.update_opportunity(123, {"name": "Updated Deal"})
+
+        assert result == {"id": 123, "name": "Updated Deal"}
+
+    @responses.activate
+    def test_delete_opportunity(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}opportunities/123",
+            status=204
+        )
+
+        result = wb.delete_opportunity(123)
+
+        assert result is True
+
+
+class TestNoteEndpoints:
+    @responses.activate
+    def test_get_note(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes/123",
+            json={"id": 123, "content": "Note content"},
+            status=200
+        )
+
+        result = wb.get_note(123)
+
+        assert result == {"id": 123, "content": "Note content"}
+
+    @responses.activate
+    def test_create_note(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}notes",
+            json={"id": 456, "content": "New note"},
+            status=201
+        )
+
+        result = wb.create_note({"content": "New note", "linked_to": [{"id": 100}]})
+
+        assert result == {"id": 456, "content": "New note"}
+
+    @responses.activate
+    def test_update_note(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}notes/123",
+            json={"id": 123, "content": "Updated note"},
+            status=200
+        )
+
+        result = wb.update_note(123, {"content": "Updated note"})
+
+        assert result == {"id": 123, "content": "Updated note"}
+
+
+class TestProjectEndpoints:
+    @responses.activate
+    def test_get_projects(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}projects",
+            json={
+                "projects": [{"id": 1, "name": "Project 1"}],
+                "meta": {"total_pages": 1}
+            },
+            status=200
+        )
+
+        result = wb.get_projects()
+
+        assert result == [{"id": 1, "name": "Project 1"}]
+
+    @responses.activate
+    def test_get_project(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}projects/123",
+            json={"id": 123, "name": "Project"},
+            status=200
+        )
+
+        result = wb.get_project(123)
+
+        assert result == {"id": 123, "name": "Project"}
+
+    @responses.activate
+    def test_create_project(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}projects",
+            json={"id": 456, "name": "New Project"},
+            status=201
+        )
+
+        result = wb.create_project({"name": "New Project"})
+
+        assert result == {"id": 456, "name": "New Project"}
+
+    @responses.activate
+    def test_update_project(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}projects/123",
+            json={"id": 123, "name": "Updated Project"},
+            status=200
+        )
+
+        result = wb.update_project(123, {"name": "Updated Project"})
+
+        assert result == {"id": 123, "name": "Updated Project"}
+
+    @responses.activate
+    def test_delete_project(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}projects/123",
+            status=204
+        )
+
+        result = wb.delete_project(123)
+
+        assert result is True
+
+
+class TestActivityEndpoint:
+    @responses.activate
+    def test_get_activity(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}activity",
+            json={
+                "activity": [{"id": 1, "type": "contact_created"}],
+                "meta": {"total_pages": 1}
+            },
+            status=200
+        )
+
+        result = wb.get_activity()
+
+        assert result == [{"id": 1, "type": "contact_created"}]
+
+
+class TestContactRolesEndpoint:
+    @responses.activate
+    def test_get_contact_roles(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contact_roles",
+            json={
+                "contact_roles": [{"id": 1, "name": "Primary"}],
+                "meta": {"total_pages": 1}
+            },
+            status=200
+        )
+
+        result = wb.get_contact_roles()
+
+        assert result == [{"id": 1, "name": "Primary"}]
+
+
+class TestUserGroupsEndpoint:
+    @responses.activate
+    def test_get_user_groups(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}user_groups",
+            json={
+                "user_groups": [{"id": 1, "name": "Admins"}],
+                "meta": {"total_pages": 1}
+            },
+            status=200
+        )
+
+        result = wb.get_user_groups()
+
+        assert result == [{"id": 1, "name": "Admins"}]
+
+
+class TestHouseholdMembersEndpoints:
+    @responses.activate
+    def test_add_household_member(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}household_members",
+            json={"household_id": 100, "contact_id": 200},
+            status=201
+        )
+
+        result = wb.add_household_member(100, 200)
+
+        assert result == {"household_id": 100, "contact_id": 200}
+        request_body = responses.calls[0].request.body
+        assert b'"household_id": 100' in request_body
+        assert b'"contact_id": 200' in request_body
+
+    @responses.activate
+    def test_remove_household_member(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}household_members/100/200",
+            status=204
+        )
+
+        result = wb.remove_household_member(100, 200)
+
+        assert result is True
