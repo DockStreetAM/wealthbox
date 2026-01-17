@@ -13,6 +13,7 @@ requests = "^2.27.1"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
+responses = "^0.25.0"
 
 [tool.poetry.group.dev.dependencies]
 python-semantic-release = "^9.4.1"
