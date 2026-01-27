@@ -195,3 +195,41 @@ def delete_contact(client, contact_id: int, confirm: bool) -> None:
     """Delete a contact by ID. Requires --confirm flag."""
     client.delete_contact(contact_id)
     click.echo(f"Contact {contact_id} deleted.")
+
+
+@contacts.command("export")
+@click.argument("contact_id", type=int)
+@click.option("--output", "-o", "output_file", type=str, default=None, help="Write to specific file path")
+@click.option("--stdout", is_flag=True, help="Print to terminal instead of writing file")
+@pass_client(write=False)
+def export_contact(client, contact_id: int, output_file: str | None, stdout: bool) -> None:
+    """Export a contact to markdown with full activity timeline.
+
+    Exports the contact (and their household) to a QMD-compatible markdown
+    file with frontmatter metadata, contact info, and a unified activity
+    timeline including notes, tasks, events, workflows, and opportunities.
+
+    \b
+    Examples:
+      wb contacts export 12345 --stdout          # Print to terminal
+      wb contacts export 12345                    # Auto-named file
+      wb contacts export 12345 -o client.md       # Specific file
+    """
+    import re as re_mod
+
+    from .export import _slugify, export_contact_to_markdown
+
+    markdown = export_contact_to_markdown(client, contact_id)
+
+    if stdout:
+        click.echo(markdown)
+    else:
+        if output_file is None:
+            # Auto-generate filename from frontmatter title
+            match = re_mod.search(r'^title:\s*"(.+?)"', markdown, re_mod.MULTILINE)
+            name = match.group(1) if match else f"contact-{contact_id}"
+            output_file = f"{_slugify(name)}-{contact_id}.md"
+
+        with open(output_file, "w") as f:
+            f.write(markdown)
+        click.echo(f"Exported to {output_file}")
