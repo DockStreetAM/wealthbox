@@ -258,14 +258,15 @@ def _fetch_all_activity(
                 seen_workflows.add(wf["id"])
                 all_workflows.append(wf)
 
-    # Tasks — API returns 0 with resource_type=contact, so fetch all once
-    # and filter client-side by linked_to (same pattern as opportunities)
-    for task in client.api_request("tasks"):
-        linked_ids = {link["id"] for link in task.get("linked_to", []) if isinstance(link, dict)}
-        if linked_ids & member_ids and task["id"] not in seen_tasks:
-            seen_tasks.add(task["id"])
-            task["comments"] = client.get_comments(task["id"], resource_type="task")
-            all_tasks.append(task)
+    # Tasks — API returns 0 with resource_type=contact, and defaults to
+    # incomplete only.  Fetch both incomplete + completed, filter by linked_to.
+    for completed_flag in ("false", "true"):
+        for task in client.api_request("tasks", params={"completed": completed_flag}):
+            linked_ids = {link["id"] for link in task.get("linked_to", []) if isinstance(link, dict)}
+            if linked_ids & member_ids and task["id"] not in seen_tasks:
+                seen_tasks.add(task["id"])
+                task["comments"] = client.get_comments(task["id"], resource_type="task")
+                all_tasks.append(task)
 
     # Opportunities — API ignores resource_id, so fetch all once and
     # filter client-side by linked_to contacts
