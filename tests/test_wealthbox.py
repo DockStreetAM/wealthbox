@@ -9,7 +9,8 @@ BASE_URL = "https://api.crmworkspace.com/v1/"
 
 @pytest.fixture
 def wb():
-    return WealthBox(token="test_token")
+    # Disable rate limit retries in tests to avoid sleeping
+    return WealthBox(token="test_token", rate_limit_retries=0)
 
 
 class TestApiRequest:

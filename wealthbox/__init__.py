@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from json import JSONDecodeError
 from typing import Any
+import time
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -46,11 +47,15 @@ class WealthBox:
         self,
         token: str | None = None,
         max_retries: int = 3,
-        backoff_factor: float = 0.5
+        backoff_factor: float = 0.5,
+        rate_limit_retries: int = 5,
+        rate_limit_max_wait: int = 120,
     ) -> None:
         self.token = token
         self.user_id: int | None = None
         self.base_url = "https://api.crmworkspace.com/v1/"
+        self._rate_limit_retries = rate_limit_retries
+        self._rate_limit_max_wait = rate_limit_max_wait
 
         # Configure retry strategy
         retry_strategy = Retry(
@@ -67,6 +72,13 @@ class WealthBox:
         self._session.mount("http://", adapter)
         self._session.headers.update({'ACCESS_TOKEN': self.token})
 
+    def _handle_rate_limit(self, response: requests.Response) -> int | None:
+        """Check for rate limit and return wait time, or None if not rate limited."""
+        if response.status_code == 429:
+            retry_after = response.headers.get('Retry-After')
+            return int(retry_after) if retry_after else 60  # default 60s
+        return None
+
     def _check_rate_limit(self, response: requests.Response) -> None:
         """Check if response indicates rate limiting and raise if so."""
         if response.status_code == 429:
@@ -79,9 +91,16 @@ class WealthBox:
 
     def raw_request(self, url_completion: str) -> requests.Response:
         url = self.base_url + url_completion
-        res = self._session.get(url)
-        self._check_rate_limit(res)
-        return res
+        for attempt in range(self._rate_limit_retries + 1):
+            res = self._session.get(url)
+            wait_time = self._handle_rate_limit(res)
+            if wait_time is None:
+                return res
+            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
+                time.sleep(wait_time)
+            else:
+                self._check_rate_limit(res)
+        return res  # unreachable but satisfies type checker
     
     def api_request(
         self,
@@ -102,8 +121,15 @@ class WealthBox:
 
         while page <= total_pages:
             params['page'] = page
-            res = self._session.get(url, params=params)
-            self._check_rate_limit(res)
+            for attempt in range(self._rate_limit_retries + 1):
+                res = self._session.get(url, params=params)
+                wait_time = self._handle_rate_limit(res)
+                if wait_time is None:
+                    break
+                if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
+                    time.sleep(wait_time)
+                else:
+                    self._check_rate_limit(res)
             try:
                 res_json = res.json()
                 if 'meta' not in res_json:
@@ -130,8 +156,15 @@ class WealthBox:
 
     def api_put(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
         url = self.base_url + endpoint
-        res = self._session.put(url, json=data)
-        self._check_rate_limit(res)
+        for attempt in range(self._rate_limit_retries + 1):
+            res = self._session.put(url, json=data)
+            wait_time = self._handle_rate_limit(res)
+            if wait_time is None:
+                break
+            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
+                time.sleep(wait_time)
+            else:
+                self._check_rate_limit(res)
         try:
             res_json = res.json()
         except JSONDecodeError as e:
@@ -143,8 +176,15 @@ class WealthBox:
 
     def api_post(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
         url = self.base_url + endpoint
-        res = self._session.post(url, json=data)
-        self._check_rate_limit(res)
+        for attempt in range(self._rate_limit_retries + 1):
+            res = self._session.post(url, json=data)
+            wait_time = self._handle_rate_limit(res)
+            if wait_time is None:
+                break
+            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
+                time.sleep(wait_time)
+            else:
+                self._check_rate_limit(res)
         try:
             res_json = res.json()
         except JSONDecodeError as e:
@@ -157,8 +197,15 @@ class WealthBox:
     def api_delete(self, endpoint: str) -> bool:
         """Delete a resource. Returns True if successful (204 status)."""
         url = self.base_url + endpoint
-        res = self._session.delete(url)
-        self._check_rate_limit(res)
+        for attempt in range(self._rate_limit_retries + 1):
+            res = self._session.delete(url)
+            wait_time = self._handle_rate_limit(res)
+            if wait_time is None:
+                break
+            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
+                time.sleep(wait_time)
+            else:
+                self._check_rate_limit(res)
         if res.status_code == 204:
             return True
         if res.status_code == 200:
@@ -180,8 +227,15 @@ class WealthBox:
     ) -> dict[str, Any]:
         """Get a single resource by ID."""
         url = self.base_url + endpoint
-        res = self._session.get(url)
-        self._check_rate_limit(res)
+        for attempt in range(self._rate_limit_retries + 1):
+            res = self._session.get(url)
+            wait_time = self._handle_rate_limit(res)
+            if wait_time is None:
+                break
+            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
+                time.sleep(wait_time)
+            else:
+                self._check_rate_limit(res)
         try:
             res_json = res.json()
         except JSONDecodeError as e:

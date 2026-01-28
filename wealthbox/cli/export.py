@@ -3,9 +3,62 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# Export cache for multi-contact exports
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExportCache:
+    """Cache for firm-wide data to reduce API calls across multiple exports.
+
+    Usage:
+        cache = ExportCache()
+        for contact_id in contact_ids:
+            markdown = export_contact_to_markdown(client, contact_id, cache=cache)
+    """
+
+    user_map: dict[int, str] | None = None
+    all_tasks: list[dict[str, Any]] | None = None
+    all_opportunities: list[dict[str, Any]] | None = None
+    _task_comments: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+
+    def get_user_map(self, client: Any) -> dict[int, str]:
+        """Get user map, fetching once and caching."""
+        if self.user_map is None:
+            self.user_map = client.make_user_map("name")
+        return self.user_map
+
+    def get_all_tasks(self, client: Any) -> list[dict[str, Any]]:
+        """Get all tasks (completed + incomplete), fetching once and caching."""
+        if self.all_tasks is None:
+            tasks: list[dict[str, Any]] = []
+            for completed_flag in ("false", "true"):
+                tasks.extend(
+                    client.api_request("tasks", params={"completed": completed_flag})
+                )
+            self.all_tasks = tasks
+        return self.all_tasks
+
+    def get_task_comments(self, client: Any, task_id: int) -> list[dict[str, Any]]:
+        """Get comments for a task, caching to avoid duplicate fetches."""
+        if task_id not in self._task_comments:
+            self._task_comments[task_id] = client.get_comments(
+                task_id, resource_type="task"
+            )
+        return self._task_comments[task_id]
+
+    def get_all_opportunities(self, client: Any) -> list[dict[str, Any]]:
+        """Get all opportunities, fetching once and caching."""
+        if self.all_opportunities is None:
+            self.all_opportunities = client.get_opportunities()
+        return self.all_opportunities
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +314,13 @@ def _fetch_all_activity(
     members: list[dict[str, Any]],
     user_map: dict[int, str],
     household_id: int | None = None,
+    cache: ExportCache | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Fetch all activity types for every member, deduplicating by ID."""
+    """Fetch all activity types for every member, deduplicating by ID.
+
+    If cache is provided, uses cached tasks and opportunities instead of
+    re-fetching from the API.
+    """
     seen_notes: set[int] = set()
     seen_tasks: set[int] = set()
     seen_events: set[int] = set()
@@ -302,17 +360,36 @@ def _fetch_all_activity(
 
     # Tasks — API returns 0 with resource_type=contact, and defaults to
     # incomplete only.  Fetch both incomplete + completed, filter by linked_to.
-    for completed_flag in ("false", "true"):
-        for task in client.api_request("tasks", params={"completed": completed_flag}):
-            linked_ids = {link["id"] for link in task.get("linked_to", []) if isinstance(link, dict)}
-            if linked_ids & member_ids and task["id"] not in seen_tasks:
-                seen_tasks.add(task["id"])
-                task["comments"] = client.get_comments(task["id"], resource_type="task")
-                all_tasks.append(task)
+    # Use cache if available to avoid re-fetching for each contact.
+    if cache is not None:
+        tasks_source = cache.get_all_tasks(client)
+    else:
+        tasks_source = []
+        for completed_flag in ("false", "true"):
+            tasks_source.extend(
+                client.api_request("tasks", params={"completed": completed_flag})
+            )
+
+    for task in tasks_source:
+        linked_ids = {link["id"] for link in task.get("linked_to", []) if isinstance(link, dict)}
+        if linked_ids & member_ids and task["id"] not in seen_tasks:
+            seen_tasks.add(task["id"])
+            # Make a copy to avoid mutating cached data
+            task_copy = dict(task)
+            if cache is not None:
+                task_copy["comments"] = cache.get_task_comments(client, task["id"])
+            else:
+                task_copy["comments"] = client.get_comments(task["id"], resource_type="task")
+            all_tasks.append(task_copy)
 
     # Opportunities — API ignores resource_id, so fetch all once and
     # filter client-side by linked_to contacts
-    for opp in client.get_opportunities():
+    if cache is not None:
+        opps_source = cache.get_all_opportunities(client)
+    else:
+        opps_source = client.get_opportunities()
+
+    for opp in opps_source:
         linked_ids = {link["id"] for link in opp.get("linked_to", []) if isinstance(link, dict)}
         if linked_ids & member_ids and opp["id"] not in seen_opps:
             seen_opps.add(opp["id"])
@@ -700,8 +777,19 @@ def _render_timeline(timeline: list[dict[str, Any]]) -> str:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def export_contact_to_markdown(client: Any, contact_id: int) -> str:
+def export_contact_to_markdown(
+    client: Any,
+    contact_id: int,
+    cache: ExportCache | None = None,
+) -> str:
     """Export a contact (and its household) to QMD-compatible markdown.
+
+    Args:
+        client: WealthBox client instance.
+        contact_id: ID of the contact to export.
+        cache: Optional ExportCache to reuse firm-wide data across exports.
+            Pass the same cache instance when exporting multiple contacts
+            to significantly reduce API calls.
 
     Returns the full markdown string.
     """
@@ -709,10 +797,16 @@ def export_contact_to_markdown(client: Any, contact_id: int) -> str:
 
     members, hh_info = _resolve_household(client, contact)
 
-    user_map = client.make_user_map("name")
+    # Use cached user_map if available
+    if cache is not None:
+        user_map = cache.get_user_map(client)
+    else:
+        user_map = client.make_user_map("name")
 
     hh_id = hh_info["id"] if hh_info else None
-    activity = _fetch_all_activity(client, members, user_map, household_id=hh_id)
+    activity = _fetch_all_activity(
+        client, members, user_map, household_id=hh_id, cache=cache
+    )
 
     timeline = _merge_activity_timeline(activity)
 
