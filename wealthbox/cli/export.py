@@ -440,6 +440,10 @@ def _render_contact_info(members: list[dict[str, Any]]) -> str:
         if info_parts:
             parts.append(" | ".join(info_parts))
 
+        # Nickname
+        if member.get("nickname"):
+            parts.append(f'**Nickname:** {member["nickname"]}')
+
         # Emails
         for email in member.get("email_addresses", []):
             addr = email.get("address", "")

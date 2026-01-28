@@ -225,6 +225,11 @@ class TestRenderContactInfo:
         assert "**Phone:** 555-1234 (Mobile)" in result
         assert "**Birth Date:** 1980-05-15" in result
 
+    def test_nickname(self):
+        member = {"name": "Robert Burgee", "nickname": "Rob"}
+        result = _render_contact_info([member])
+        assert "**Nickname:** Rob" in result
+
     def test_multiple_members(self):
         m1 = {"name": "John Smith", "type": "Person"}
         m2 = {"name": "Jane Smith", "type": "Person"}
