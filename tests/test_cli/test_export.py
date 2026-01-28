@@ -668,19 +668,16 @@ def _register_single_contact(contact_id, contact_data):
 
 
 def _register_empty_activity(member_id):
-    """Register empty activity endpoints for a member."""
+    """Register empty activity endpoints for a member.
+
+    Call order: per-member loop fetches notes, events, workflows(x3).
+    After the loop: tasks(x2 for completed=false/true), opportunities(x1).
+    """
     # Notes (uses status_updates key)
     responses.add(
         responses.GET,
         f"{BASE_URL}notes",
         json={"status_updates": [], "meta": {"total_pages": 1}},
-        status=200,
-    )
-    # Tasks
-    responses.add(
-        responses.GET,
-        f"{BASE_URL}tasks",
-        json={"tasks": [], "meta": {"total_pages": 1}},
         status=200,
     )
     # Events
@@ -696,6 +693,14 @@ def _register_empty_activity(member_id):
             responses.GET,
             f"{BASE_URL}workflows",
             json={"workflows": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+    # Tasks (completed=false + completed=true, fetched once after member loop)
+    for _ in range(2):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
             status=200,
         )
     # Opportunities
@@ -1207,3 +1212,342 @@ class TestTimelineTargetClose:
         # target_close so falls back to created_at (missing) → datetime.min
         assert timeline[0]["name"] == "Has target"
         assert timeline[1]["name"] == "Old field only"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Task API edge cases (from live API debugging)
+# ---------------------------------------------------------------------------
+
+
+class TestTasksFiltering:
+    @responses.activate
+    def test_only_linked_tasks_exported(self, runner, mock_token):
+        """Tasks are filtered by linked_to, same as opportunities."""
+        contact = {"id": 1, "name": "Test", "type": "Person"}
+        _register_single_contact(1, contact)
+        _register_users_endpoint()
+
+        # Notes, events, workflows — empty (per-member loop)
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={"status_updates": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}events",
+            json={"events": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        for _ in range(3):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}workflows",
+                json={"workflows": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+
+        # Tasks — mix of linked and unlinked (fetched after loop)
+        linked_tasks = [
+            {
+                "id": 10,
+                "name": "Linked Task",
+                "completed": False,
+                "due_date": "2026-02-01",
+                "linked_to": [{"id": 1, "type": "Contact"}],
+            },
+            {
+                "id": 11,
+                "name": "Unrelated Task",
+                "completed": False,
+                "due_date": "2026-02-01",
+                "linked_to": [{"id": 999, "type": "Contact"}],
+            },
+            {
+                "id": 12,
+                "name": "No Link Task",
+                "completed": False,
+                "due_date": "2026-02-01",
+            },
+        ]
+        # completed=false
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": linked_tasks, "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # completed=true
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Comments for the one linked task
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}comments",
+            json={"comments": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Opportunities
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        result = runner.invoke(cli, ["contacts", "export", "1", "--stdout"])
+        assert result.exit_code == 0, result.output
+        assert "Linked Task" in result.output
+        assert "Unrelated Task" not in result.output
+        assert "No Link Task" not in result.output
+
+    @responses.activate
+    def test_completed_and_incomplete_tasks(self, runner, mock_token):
+        """Both completed and incomplete tasks appear in export."""
+        contact = {"id": 1, "name": "Test", "type": "Person"}
+        _register_single_contact(1, contact)
+        _register_users_endpoint()
+
+        # Per-member loop: notes, events, workflows — empty
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={"status_updates": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}events",
+            json={"events": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        for _ in range(3):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}workflows",
+                json={"workflows": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+
+        # Tasks completed=false — one open task
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={
+                "tasks": [
+                    {
+                        "id": 10,
+                        "name": "Open task",
+                        "complete": False,
+                        "due_date": "2026-02-01",
+                        "linked_to": [{"id": 1, "type": "Contact"}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Tasks completed=true — one done task
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={
+                "tasks": [
+                    {
+                        "id": 11,
+                        "name": "Done task",
+                        "complete": True,
+                        "due_date": "2026-01-15",
+                        "linked_to": [{"id": 1, "type": "Contact"}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Comments for both tasks
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}comments",
+            json={"comments": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}comments",
+            json={"comments": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Opportunities
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        result = runner.invoke(cli, ["contacts", "export", "1", "--stdout"])
+        assert result.exit_code == 0, result.output
+        assert "Open task" in result.output
+        assert "Done task" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Household ID in linked_to filter
+# ---------------------------------------------------------------------------
+
+
+class TestHouseholdIdInFilter:
+    @responses.activate
+    def test_opp_linked_to_household_id(self, runner, mock_token):
+        """Opps linked to the household contact itself (not just members)."""
+        household = {
+            "id": 200,
+            "name": "Smith HH",
+            "type": "Household",
+            "members": [
+                {"contact": {"id": 101, "name": "John"}},
+            ],
+        }
+        _register_single_contact(200, household)
+        _register_single_contact(101, {"id": 101, "name": "John", "type": "Person"})
+        _register_users_endpoint()
+
+        # Per-member activity for member 101 — all empty
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={"status_updates": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}events",
+            json={"events": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        for _ in range(3):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}workflows",
+                json={"workflows": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+
+        # Tasks — empty
+        for _ in range(2):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}tasks",
+                json={"tasks": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+
+        # Opportunities — one linked to household ID 200, one to member 101
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={
+                "opportunities": [
+                    {
+                        "id": 50,
+                        "name": "Household Opp",
+                        "linked_to": [{"id": 200, "type": "Contact"}],
+                        "target_close": "2026-06-01",
+                    },
+                    {
+                        "id": 51,
+                        "name": "Member Opp",
+                        "linked_to": [{"id": 101, "type": "Contact"}],
+                        "target_close": "2026-07-01",
+                    },
+                    {
+                        "id": 52,
+                        "name": "Other Opp",
+                        "linked_to": [{"id": 999, "type": "Contact"}],
+                        "target_close": "2026-08-01",
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+
+        result = runner.invoke(cli, ["contacts", "export", "200", "--stdout"])
+        assert result.exit_code == 0, result.output
+        assert "Household Opp" in result.output
+        assert "Member Opp" in result.output
+        assert "Other Opp" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Members with direct ID format
+# ---------------------------------------------------------------------------
+
+
+class TestMembersDirectIdFormat:
+    @responses.activate
+    def test_member_with_direct_id(self):
+        """Live API returns members as {id: N, type: ...} not {contact: {id: N}}."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/101",
+            json={"id": 101, "name": "John", "type": "Person"},
+            status=200,
+        )
+
+        # Live API format: direct id at top level
+        household = {
+            "id": 200,
+            "name": "Smith HH",
+            "type": "Household",
+            "members": [
+                {"id": 101, "type": "Person", "first_name": "John", "last_name": "Smith", "title": "Primary"},
+            ],
+        }
+        members = _fetch_household_members(client, household)
+        assert len(members) == 1
+        assert members[0]["name"] == "John"
+
+    @responses.activate
+    def test_member_mixed_formats(self):
+        """Handle both nested contact and direct id formats."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/101",
+            json={"id": 101, "name": "John", "type": "Person"},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/102",
+            json={"id": 102, "name": "Jane", "type": "Person"},
+            status=200,
+        )
+
+        household = {
+            "id": 200,
+            "name": "Smith HH",
+            "type": "Household",
+            "members": [
+                {"contact": {"id": 101}},  # nested format
+                {"id": 102, "type": "Person", "first_name": "Jane"},  # direct format
+            ],
+        }
+        members = _fetch_household_members(client, household)
+        assert len(members) == 2
+        assert members[0]["name"] == "John"
+        assert members[1]["name"] == "Jane"
