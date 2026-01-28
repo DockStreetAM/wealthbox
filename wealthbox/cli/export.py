@@ -77,6 +77,47 @@ class _HTMLToMarkdownConverter(HTMLParser):
         return text.strip()
 
 
+def _collapse_newlines(text: str) -> str:
+    """Collapse excessive blank lines while preserving paragraph breaks.
+
+    Heuristic: if the text is mostly short lines (structured/tabular data
+    like CurrentClient call logs), remove blank lines entirely and use
+    single newlines.  If it contains real paragraphs, keep one blank line
+    between them.
+    """
+    lines = [line.rstrip() for line in text.split("\n")]
+    content_lines = [l for l in lines if l.strip()]
+    if not content_lines:
+        return text.strip()
+
+    # Decide mode: if most content lines are short and blanks are dense,
+    # treat as structured/tabular data and remove blank lines.
+    median_len = sorted(len(l) for l in content_lines)[len(content_lines) // 2]
+    blank_count = len(lines) - len(content_lines)
+    compact = (
+        median_len < 60
+        and blank_count * 2 >= len(content_lines)
+        and len(content_lines) >= 4
+    )
+
+    if compact:
+        # Remove all blank lines — single newlines only
+        return "\n".join(content_lines)
+
+    # Normal mode: collapse runs of blank lines to at most one
+    collapsed: list[str] = []
+    blank_run = 0
+    for line in lines:
+        if line == "":
+            blank_run += 1
+        else:
+            if blank_run > 0:
+                collapsed.append("")
+            blank_run = 0
+            collapsed.append(line)
+    return "\n".join(collapsed)
+
+
 def _html_to_markdown(html_str: str) -> str:
     """Convert HTML content to readable markdown."""
     if not html_str:
@@ -85,7 +126,8 @@ def _html_to_markdown(html_str: str) -> str:
         return html_str
     converter = _HTMLToMarkdownConverter()
     converter.feed(html_str)
-    return converter.get_result()
+    result = converter.get_result()
+    return _collapse_newlines(result)
 
 
 # ---------------------------------------------------------------------------

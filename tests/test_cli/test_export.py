@@ -9,6 +9,7 @@ import responses
 from click.testing import CliRunner
 
 from wealthbox.cli.export import (
+    _collapse_newlines,
     _escape_yaml,
     _extract_body,
     _fetch_household_members,
@@ -1551,3 +1552,73 @@ class TestMembersDirectIdFormat:
         assert len(members) == 2
         assert members[0]["name"] == "John"
         assert members[1]["name"] == "Jane"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _collapse_newlines
+# ---------------------------------------------------------------------------
+
+
+class TestCollapseNewlines:
+    def test_structured_data_compacted(self):
+        """CurrentClient-style structured data: short lines with blank between each."""
+        text = (
+            "Call with John Smith\n\n"
+            "Contact number\n\n"
+            "+1 (555) 123-4567\n\n"
+            "Call direction\n\n"
+            "Outgoing\n\n"
+            "Call time\n\n"
+            "0:02:32\n\n"
+            "Call status\n\n"
+            "Completed"
+        )
+        result = _collapse_newlines(text)
+        assert "\n\n" not in result
+        assert "Call with John Smith\nContact number\n+1 (555) 123-4567" in result
+
+    def test_paragraph_text_preserved(self):
+        """Normal paragraph text keeps blank lines between paragraphs."""
+        text = (
+            "Had a productive meeting with the client to discuss their retirement planning goals "
+            "and portfolio allocation strategy for the coming year.\n\n"
+            "They expressed interest in increasing their equity exposure and reducing fixed income "
+            "allocations given the current market conditions and their risk tolerance."
+        )
+        result = _collapse_newlines(text)
+        # Should preserve the blank line between paragraphs
+        assert "\n\n" in result
+
+    def test_short_note_not_compacted(self):
+        """A short 2-3 line note should NOT be compacted even if lines are short."""
+        text = "Called client.\n\nWill follow up."
+        result = _collapse_newlines(text)
+        # Only 2 content lines — too few to trigger compact mode
+        assert "\n\n" in result
+
+    def test_multiple_blank_lines_collapsed(self):
+        """Runs of blank lines collapse to one in non-compact mode."""
+        text = "First paragraph.\n\n\n\nSecond paragraph."
+        result = _collapse_newlines(text)
+        assert result == "First paragraph.\n\nSecond paragraph."
+
+    def test_empty_text(self):
+        assert _collapse_newlines("") == ""
+        assert _collapse_newlines("\n\n\n") == ""
+
+    def test_html_to_markdown_applies_collapse(self):
+        """_html_to_markdown uses _collapse_newlines on its output."""
+        html = (
+            "<p>Contact number</p>"
+            "<p>+1 (555) 123-4567</p>"
+            "<p>Call direction</p>"
+            "<p>Outgoing</p>"
+            "<p>Call time</p>"
+            "<p>0:02:32</p>"
+            "<p>Call status</p>"
+            "<p>Completed</p>"
+        )
+        result = _html_to_markdown(html)
+        # Should be compacted — no blank lines between structured fields
+        assert "\n\n" not in result
+        assert "Contact number\n+1 (555) 123-4567" in result
