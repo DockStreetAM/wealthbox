@@ -233,3 +233,154 @@ def export_contact(client, contact_id: int, output_file: str | None, stdout: boo
         with open(output_file, "w") as f:
             f.write(markdown)
         click.echo(f"Exported to {output_file}")
+
+
+@contacts.command("export-all")
+@click.option("--output-dir", "-o", type=str, default="./exports", help="Output directory for markdown files")
+@click.option("--contact-type", type=str, default=None, help="Filter by contact_type: Client, Prospect, etc.")
+@click.option("--dry-run", is_flag=True, help="Show what would be exported without actually exporting")
+@pass_client(write=False)
+def export_all_contacts(
+    client,
+    output_dir: str,
+    contact_type: str | None,
+    dry_run: bool,
+) -> None:
+    """Export all contacts to markdown files in three phases.
+
+    Phase 1: Export all Households (includes their members)
+    Phase 2: Export Person contacts not already in a household
+    Phase 3: Export Trust and Organization contacts
+
+    Uses caching to minimize API calls across all exports.
+
+    \b
+    Examples:
+      wb contacts export-all                           # Export to ./exports/
+      wb contacts export-all -o ~/client-exports/      # Custom directory
+      wb contacts export-all --contact-type Client     # Only clients
+      wb contacts export-all --dry-run                 # Preview what would export
+    """
+    import os
+    import re as re_mod
+
+    from .export import ExportCache, _slugify, export_contact_to_markdown
+
+    # Create output directory if needed
+    if not dry_run:
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Build filter params
+    params: dict[str, Any] = {}
+    if contact_type:
+        params["contact_type"] = contact_type
+
+    # Initialize cache for efficiency
+    cache = ExportCache()
+
+    # Track which contact IDs we've already exported (as household members)
+    exported_ids: set[int] = set()
+    stats = {"households": 0, "persons": 0, "trusts": 0, "organizations": 0, "skipped": 0, "errors": 0}
+
+    def do_export(contact: dict[str, Any], phase: str) -> None:
+        """Export a single contact and track its members."""
+        contact_id = contact["id"]
+        name = contact.get("name", f"contact-{contact_id}")
+
+        if contact_id in exported_ids:
+            stats["skipped"] += 1
+            return
+
+        if dry_run:
+            click.echo(f"  [{phase}] Would export: {name} (ID: {contact_id})")
+            exported_ids.add(contact_id)
+            # Track household members
+            for member in contact.get("members", []):
+                member_id = member.get("id") or member.get("contact", {}).get("id")
+                if member_id:
+                    exported_ids.add(member_id)
+            return
+
+        try:
+            markdown = export_contact_to_markdown(client, contact_id, cache=cache)
+
+            # Generate filename
+            match = re_mod.search(r'^title:\s*"(.+?)"', markdown, re_mod.MULTILINE)
+            title = match.group(1) if match else name
+            filename = f"{_slugify(title)}.md"
+            filepath = os.path.join(output_dir, filename)
+
+            with open(filepath, "w") as f:
+                f.write(markdown)
+
+            click.echo(f"  [{phase}] {name} -> {filename}")
+            exported_ids.add(contact_id)
+
+            # Track household members so we don't re-export them
+            for member in contact.get("members", []):
+                member_id = member.get("id") or member.get("contact", {}).get("id")
+                if member_id:
+                    exported_ids.add(member_id)
+
+        except Exception as e:
+            click.echo(f"  [{phase}] ERROR exporting {name}: {e}", err=True)
+            stats["errors"] += 1
+
+    # Phase 1: Households
+    click.echo("\n=== Phase 1: Households ===")
+    household_params = {**params, "type": "Household"}
+    households = client.get_contacts(filters=household_params)
+    click.echo(f"Found {len(households)} households")
+
+    for i, hh in enumerate(households, 1):
+        if not dry_run:
+            click.echo(f"[{i}/{len(households)}]", nl=False)
+        do_export(hh, "HH")
+        stats["households"] += 1
+
+    # Phase 2: Persons not in households
+    click.echo("\n=== Phase 2: Individual Persons ===")
+    person_params = {**params, "type": "Person"}
+    persons = client.get_contacts(filters=person_params)
+    not_in_hh = [p for p in persons if p["id"] not in exported_ids]
+    click.echo(f"Found {len(persons)} persons, {len(not_in_hh)} not in households")
+
+    for i, person in enumerate(not_in_hh, 1):
+        if not dry_run:
+            click.echo(f"[{i}/{len(not_in_hh)}]", nl=False)
+        do_export(person, "Person")
+        stats["persons"] += 1
+
+    # Phase 3: Trusts and Organizations
+    click.echo("\n=== Phase 3: Trusts & Organizations ===")
+
+    trust_params = {**params, "type": "Trust"}
+    trusts = client.get_contacts(filters=trust_params)
+    click.echo(f"Found {len(trusts)} trusts")
+
+    for i, trust in enumerate(trusts, 1):
+        if not dry_run:
+            click.echo(f"[{i}/{len(trusts)}]", nl=False)
+        do_export(trust, "Trust")
+        stats["trusts"] += 1
+
+    org_params = {**params, "type": "Organization"}
+    orgs = client.get_contacts(filters=org_params)
+    click.echo(f"Found {len(orgs)} organizations")
+
+    for i, org in enumerate(orgs, 1):
+        if not dry_run:
+            click.echo(f"[{i}/{len(orgs)}]", nl=False)
+        do_export(org, "Org")
+        stats["organizations"] += 1
+
+    # Summary
+    click.echo("\n=== Summary ===")
+    click.echo(f"Households:    {stats['households']}")
+    click.echo(f"Persons:       {stats['persons']}")
+    click.echo(f"Trusts:        {stats['trusts']}")
+    click.echo(f"Organizations: {stats['organizations']}")
+    click.echo(f"Skipped:       {stats['skipped']}")
+    if stats["errors"]:
+        click.echo(f"Errors:        {stats['errors']}")
+    click.echo(f"Total exported: {len(exported_ids)}")
