@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import responses
 from click.testing import CliRunner
 
 from wealthbox.cli.export import (
+    ExportCache,
+    ExportMetadata,
     _collapse_newlines,
+    _collect_linked_ids,
     _escape_yaml,
     _extract_body,
     _fetch_household_members,
     _format_date,
     _format_datetime,
     _html_to_markdown,
+    _is_after,
     _merge_activity_timeline,
     _parse_wb_date,
     _render_comments,
@@ -28,6 +34,7 @@ from wealthbox.cli.export import (
     _render_timeline,
     _render_workflow,
     _slugify,
+    find_dirty_contacts,
 )
 from wealthbox.cli.main import cli
 
@@ -1753,3 +1760,786 @@ class TestExportAllCommand:
         phase2_exports = [l for l in phase2_lines if "Would export" in l]
         assert len(phase2_exports) == 1
         assert "Solo Person" in phase2_exports[0]
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: ExportMetadata
+# ---------------------------------------------------------------------------
+
+
+class TestExportMetadata:
+    def test_load_nonexistent(self, tmp_path):
+        """Loading from a directory without metadata returns defaults."""
+        meta = ExportMetadata.load(str(tmp_path))
+        assert meta.last_export is None
+        assert meta.contact_files == {}
+        assert meta.version == 1
+
+    def test_save_and_load_roundtrip(self, tmp_path):
+        """Saved metadata can be loaded back."""
+        meta = ExportMetadata(
+            last_export=datetime(2026, 1, 28, 12, 0, 0, tzinfo=timezone.utc),
+            contact_files={100: "smith-john.md", 200: "smith-household.md"},
+            version=1,
+        )
+        meta.save(str(tmp_path))
+
+        loaded = ExportMetadata.load(str(tmp_path))
+        assert loaded.last_export is not None
+        assert loaded.last_export.year == 2026
+        assert loaded.last_export.month == 1
+        assert loaded.last_export.day == 28
+        assert loaded.contact_files == {100: "smith-john.md", 200: "smith-household.md"}
+        assert loaded.version == 1
+
+    def test_save_creates_file(self, tmp_path):
+        """Save creates .export-meta.json in the output directory."""
+        meta = ExportMetadata(
+            last_export=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        )
+        meta.save(str(tmp_path))
+        assert os.path.exists(os.path.join(str(tmp_path), ".export-meta.json"))
+
+    def test_load_corrupt_file(self, tmp_path):
+        """Corrupt metadata file returns defaults."""
+        path = os.path.join(str(tmp_path), ".export-meta.json")
+        with open(path, "w") as f:
+            f.write("not valid json")
+        meta = ExportMetadata.load(str(tmp_path))
+        assert meta.last_export is None
+
+    def test_save_with_no_last_export(self, tmp_path):
+        """Saving metadata with no last_export stores null."""
+        meta = ExportMetadata()
+        meta.save(str(tmp_path))
+        loaded = ExportMetadata.load(str(tmp_path))
+        assert loaded.last_export is None
+
+    def test_contact_files_int_keys(self, tmp_path):
+        """contact_files keys are stored as strings but loaded as ints."""
+        meta = ExportMetadata(
+            last_export=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            contact_files={42: "test.md"},
+        )
+        meta.save(str(tmp_path))
+        # Verify JSON has string keys
+        with open(os.path.join(str(tmp_path), ".export-meta.json")) as f:
+            raw = json.load(f)
+        assert "42" in raw["contact_files"]
+        # Load converts back to int
+        loaded = ExportMetadata.load(str(tmp_path))
+        assert 42 in loaded.contact_files
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _is_after helper
+# ---------------------------------------------------------------------------
+
+
+class TestIsAfter:
+    def test_after_returns_true(self):
+        threshold = datetime(2026, 1, 15)
+        assert _is_after("2026-01-20", threshold) is True
+
+    def test_before_returns_false(self):
+        threshold = datetime(2026, 1, 15)
+        assert _is_after("2026-01-10", threshold) is False
+
+    def test_none_returns_false(self):
+        threshold = datetime(2026, 1, 15)
+        assert _is_after(None, threshold) is False
+
+    def test_empty_returns_false(self):
+        threshold = datetime(2026, 1, 15)
+        assert _is_after("", threshold) is False
+
+    def test_tz_aware_comparison(self):
+        threshold = datetime(2026, 1, 15, tzinfo=timezone.utc)
+        assert _is_after("2026-01-20 03:00 PM -0400", threshold) is True
+
+    def test_equal_returns_false(self):
+        threshold = datetime(2026, 1, 15)
+        assert _is_after("2026-01-15", threshold) is False
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: _collect_linked_ids helper
+# ---------------------------------------------------------------------------
+
+
+class TestCollectLinkedIds:
+    def test_collects_ids(self):
+        item = {"linked_to": [{"id": 1, "type": "Contact"}, {"id": 2, "type": "Contact"}]}
+        assert _collect_linked_ids(item) == {1, 2}
+
+    def test_no_linked_to(self):
+        assert _collect_linked_ids({}) == set()
+
+    def test_skips_non_dict(self):
+        item = {"linked_to": [{"id": 1}, "bad", 42]}
+        assert _collect_linked_ids(item) == {1}
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: find_dirty_contacts
+# ---------------------------------------------------------------------------
+
+
+class TestFindDirtyContacts:
+    @responses.activate
+    def test_none_last_export_returns_none(self):
+        """First run (no last_export) returns None to signal full export."""
+        cache = ExportCache()
+        result = find_dirty_contacts(
+            client=None,  # Not called when last_export is None
+            last_export=None,
+            cache=cache,
+        )
+        assert result is None
+
+    @responses.activate
+    def test_updated_contacts_are_dirty(self):
+        """Contacts returned by updated_since filter are marked dirty."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+        last_export = datetime(2026, 1, 20, tzinfo=timezone.utc)
+
+        # updated_since returns one contact
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [{"id": 100, "name": "Updated Contact"}],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Tasks (completed=false + true)
+        for _ in range(2):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}tasks",
+                json={"tasks": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+        # Opportunities
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        cache = ExportCache()
+        result = find_dirty_contacts(client, last_export, cache)
+        assert result is not None
+        assert 100 in result
+
+    @responses.activate
+    def test_household_member_marks_household_dirty(self):
+        """If an updated contact has a household, the household is also dirty."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+        last_export = datetime(2026, 1, 20, tzinfo=timezone.utc)
+
+        # updated_since returns contact with household
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [
+                    {"id": 101, "name": "John Smith", "household": {"id": 200, "name": "Smith HH"}},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Tasks
+        for _ in range(2):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}tasks",
+                json={"tasks": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+        # Opportunities
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        cache = ExportCache()
+        result = find_dirty_contacts(client, last_export, cache)
+        assert result is not None
+        assert 101 in result
+        assert 200 in result  # Household also dirty
+
+    @responses.activate
+    def test_new_task_marks_linked_contacts_dirty(self):
+        """Tasks created after last_export mark their linked contacts dirty."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+        last_export = datetime(2026, 1, 20, tzinfo=timezone.utc)
+
+        # No updated contacts
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Tasks — one new task linked to contact 100
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={
+                "tasks": [
+                    {
+                        "id": 10,
+                        "name": "New Task",
+                        "completed": False,
+                        "created_at": "2026-01-25",
+                        "linked_to": [{"id": 100, "type": "Contact"}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Tasks completed=true
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Opportunities
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Comments for the new task (within lookback window)
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}comments",
+            json={"comments": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        cache = ExportCache()
+        result = find_dirty_contacts(client, last_export, cache)
+        assert result is not None
+        assert 100 in result
+
+    @responses.activate
+    def test_new_opportunity_marks_linked_contacts_dirty(self):
+        """Opportunities created after last_export mark linked contacts dirty."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+        last_export = datetime(2026, 1, 20, tzinfo=timezone.utc)
+
+        # No updated contacts
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Tasks
+        for _ in range(2):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}tasks",
+                json={"tasks": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+        # Opportunities — one new
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={
+                "opportunities": [
+                    {
+                        "id": 50,
+                        "name": "New Deal",
+                        "created_at": "2026-01-25",
+                        "linked_to": [{"id": 300, "type": "Contact"}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+
+        cache = ExportCache()
+        result = find_dirty_contacts(client, last_export, cache)
+        assert result is not None
+        assert 300 in result
+
+    @responses.activate
+    def test_new_comment_on_recent_task_marks_dirty(self):
+        """New comment on a recent task marks linked contacts dirty."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+        last_export = datetime(2026, 1, 20, tzinfo=timezone.utc)
+
+        # No updated contacts
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Tasks — old task (but within lookback window) linked to contact 100
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={
+                "tasks": [
+                    {
+                        "id": 10,
+                        "name": "Old Task",
+                        "completed": True,
+                        "created_at": "2026-01-10",  # Before last_export but within 30d
+                        "linked_to": [{"id": 100, "type": "Contact"}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Opportunities
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Comments for the task — one NEW comment
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}comments",
+            json={
+                "comments": [
+                    {"id": 500, "creator": 10, "created_at": "2026-01-22", "body": "New comment"},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+
+        cache = ExportCache()
+        result = find_dirty_contacts(client, last_export, cache)
+        assert result is not None
+        assert 100 in result
+
+    @responses.activate
+    def test_no_changes_returns_empty_set(self):
+        """When nothing has changed, return empty set."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+        last_export = datetime(2026, 1, 20, tzinfo=timezone.utc)
+
+        # No updated contacts
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Tasks — old task with no new comments
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={
+                "tasks": [
+                    {
+                        "id": 10,
+                        "completed": True,
+                        "created_at": "2026-01-05",
+                        "linked_to": [{"id": 100, "type": "Contact"}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Opportunities — old
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={
+                "opportunities": [
+                    {
+                        "id": 50,
+                        "created_at": "2026-01-05",
+                        "linked_to": [{"id": 100}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Comments for old task — old comment
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}comments",
+            json={
+                "comments": [
+                    {"id": 500, "creator": 10, "created_at": "2026-01-06", "body": "Old"},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+
+        cache = ExportCache()
+        result = find_dirty_contacts(client, last_export, cache)
+        assert result is not None
+        assert len(result) == 0
+
+    @responses.activate
+    def test_old_task_outside_lookback_skips_comments(self):
+        """Tasks older than lookback window don't have their comments checked."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+        last_export = datetime(2026, 1, 20, tzinfo=timezone.utc)
+
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Task from 60 days ago — outside 30-day lookback
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={
+                "tasks": [
+                    {
+                        "id": 10,
+                        "completed": True,
+                        "created_at": "2025-11-20",
+                        "linked_to": [{"id": 100}],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # No comments should be fetched for the old task
+
+        cache = ExportCache()
+        result = find_dirty_contacts(client, last_export, cache, comment_lookback_days=30)
+        assert result is not None
+        assert 100 not in result
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: incremental export-all
+# ---------------------------------------------------------------------------
+
+
+def _register_contact_phases(
+    households=None, persons=None, trusts=None, orgs=None,
+):
+    """Register all four contact list endpoints for export-all phases."""
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}contacts",
+        json={
+            "contacts": households or [],
+            "meta": {"total_pages": 1},
+        },
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}contacts",
+        json={
+            "contacts": persons or [],
+            "meta": {"total_pages": 1},
+        },
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}contacts",
+        json={
+            "contacts": trusts or [],
+            "meta": {"total_pages": 1},
+        },
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}contacts",
+        json={
+            "contacts": orgs or [],
+            "meta": {"total_pages": 1},
+        },
+        status=200,
+    )
+
+
+class TestIncrementalExportAll:
+    @responses.activate
+    def test_first_export_creates_metadata(self, runner, mock_token, tmp_path):
+        """First export creates .export-meta.json with timestamp."""
+        out_dir = str(tmp_path / "exports")
+
+        # Phase contacts
+        _register_contact_phases(
+            persons=[{"id": 100, "name": "Test Person", "type": "Person"}],
+        )
+        # Single contact export
+        _register_single_contact(100, {"id": 100, "name": "Test Person", "type": "Person"})
+        _register_users_endpoint()
+        _register_empty_activity(100)
+
+        result = runner.invoke(cli, ["contacts", "export-all", "-o", out_dir])
+        assert result.exit_code == 0, result.output
+
+        meta = ExportMetadata.load(out_dir)
+        assert meta.last_export is not None
+        assert 100 in meta.contact_files
+
+    @responses.activate
+    def test_incremental_skips_clean_contacts(self, runner, mock_token, tmp_path):
+        """Incremental export skips contacts not in dirty set."""
+        out_dir = str(tmp_path / "exports")
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Pre-seed metadata from a previous export
+        meta = ExportMetadata(
+            last_export=datetime(2026, 1, 20, tzinfo=timezone.utc),
+            contact_files={100: "test-person.md"},
+        )
+        meta.save(out_dir)
+
+        # Dirty detection: updated_since returns empty
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Tasks
+        for _ in range(2):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}tasks",
+                json={"tasks": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+        # Opportunities
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        # Phase contacts (person 100 still exists but is clean)
+        _register_contact_phases(
+            persons=[{"id": 100, "name": "Test Person", "type": "Person"}],
+        )
+
+        result = runner.invoke(cli, ["contacts", "export-all", "-o", out_dir])
+        assert result.exit_code == 0, result.output
+        assert "Skipped (clean): 1" in result.output
+        assert "Files updated: 0" in result.output
+
+    @responses.activate
+    def test_incremental_exports_dirty_contact(self, runner, mock_token, tmp_path):
+        """Incremental export re-exports contacts that are dirty."""
+        out_dir = str(tmp_path / "exports")
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Pre-seed metadata
+        meta = ExportMetadata(
+            last_export=datetime(2026, 1, 20, tzinfo=timezone.utc),
+            contact_files={100: "test-person.md"},
+        )
+        meta.save(out_dir)
+
+        # Dirty detection: contact 100 was updated
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [{"id": 100, "name": "Test Person"}],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        for _ in range(2):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}tasks",
+                json={"tasks": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        # Phase contacts
+        _register_contact_phases(
+            persons=[{"id": 100, "name": "Test Person", "type": "Person"}],
+        )
+        # Export the dirty contact
+        _register_single_contact(100, {"id": 100, "name": "Test Person", "type": "Person"})
+        _register_users_endpoint()
+        _register_empty_activity(100)
+
+        result = runner.invoke(cli, ["contacts", "export-all", "-o", out_dir])
+        assert result.exit_code == 0, result.output
+        assert "Files updated: 1" in result.output
+        assert "test-person.md" in result.output
+
+    @responses.activate
+    def test_full_flag_exports_everything(self, runner, mock_token, tmp_path):
+        """--full flag exports all contacts regardless of metadata."""
+        out_dir = str(tmp_path / "exports")
+        os.makedirs(out_dir, exist_ok=True)
+
+        # Pre-seed metadata
+        meta = ExportMetadata(
+            last_export=datetime(2026, 1, 20, tzinfo=timezone.utc),
+            contact_files={100: "test-person.md"},
+        )
+        meta.save(out_dir)
+
+        # Phase contacts
+        _register_contact_phases(
+            persons=[{"id": 100, "name": "Test Person", "type": "Person"}],
+        )
+        # Export the contact (full mode skips dirty detection)
+        _register_single_contact(100, {"id": 100, "name": "Test Person", "type": "Person"})
+        _register_users_endpoint()
+        _register_empty_activity(100)
+
+        result = runner.invoke(cli, ["contacts", "export-all", "-o", out_dir, "--full"])
+        assert result.exit_code == 0, result.output
+        assert "Full export mode" in result.output
+        assert "Files updated: 1" in result.output
+
+    @responses.activate
+    def test_dry_run_does_not_save_metadata(self, runner, mock_token, tmp_path):
+        """Dry run does not create .export-meta.json."""
+        out_dir = str(tmp_path / "exports")
+
+        _register_contact_phases(
+            persons=[{"id": 100, "name": "Test Person", "type": "Person"}],
+        )
+
+        result = runner.invoke(cli, ["contacts", "export-all", "-o", out_dir, "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert not os.path.exists(os.path.join(out_dir, ".export-meta.json"))
+
+    @responses.activate
+    def test_incremental_with_dirty_household_member(self, runner, mock_token, tmp_path):
+        """If a household member is dirty, the household is exported."""
+        out_dir = str(tmp_path / "exports")
+        os.makedirs(out_dir, exist_ok=True)
+
+        meta = ExportMetadata(
+            last_export=datetime(2026, 1, 20, tzinfo=timezone.utc),
+            contact_files={200: "smith-household.md"},
+        )
+        meta.save(out_dir)
+
+        # Dirty detection: member 101 was updated, household 200 also dirty
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [
+                    {"id": 101, "name": "John Smith", "household": {"id": 200, "name": "Smith HH"}},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        for _ in range(2):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}tasks",
+                json={"tasks": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={"opportunities": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        # Phase contacts: household with member
+        _register_contact_phases(
+            households=[
+                {
+                    "id": 200,
+                    "name": "Smith Household",
+                    "type": "Household",
+                    "members": [{"id": 101}],
+                },
+            ],
+        )
+        # Export the household
+        _register_single_contact(
+            200,
+            {
+                "id": 200,
+                "name": "Smith Household",
+                "type": "Household",
+                "members": [{"contact": {"id": 101}}],
+            },
+        )
+        _register_single_contact(101, {"id": 101, "name": "John Smith", "type": "Person"})
+        _register_users_endpoint()
+        _register_empty_activity(101)
+
+        result = runner.invoke(cli, ["contacts", "export-all", "-o", out_dir])
+        assert result.exit_code == 0, result.output
+        assert "Files updated: 1" in result.output

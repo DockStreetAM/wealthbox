@@ -239,12 +239,16 @@ def export_contact(client, contact_id: int, output_file: str | None, stdout: boo
 @click.option("--output-dir", "-o", type=str, default="./exports", help="Output directory for markdown files")
 @click.option("--contact-type", type=str, default=None, help="Filter by contact_type: Client, Prospect, etc.")
 @click.option("--dry-run", is_flag=True, help="Show what would be exported without actually exporting")
+@click.option("--incremental/--full", default=True, help="Only update changed files (default) or force full rebuild")
+@click.option("--comment-lookback-days", type=int, default=30, help="Days to look back for new comments on existing items")
 @pass_client(write=False)
 def export_all_contacts(
     client,
     output_dir: str,
     contact_type: str | None,
     dry_run: bool,
+    incremental: bool,
+    comment_lookback_days: int,
 ) -> None:
     """Export all contacts to markdown files in three phases.
 
@@ -253,18 +257,28 @@ def export_all_contacts(
     Phase 3: Export Trust and Organization contacts
 
     Uses caching to minimize API calls across all exports.
+    Incremental mode (default) only re-exports contacts with changes
+    since the last export.
 
     \b
     Examples:
-      wb contacts export-all                           # Export to ./exports/
+      wb contacts export-all                           # Incremental update
       wb contacts export-all -o ~/client-exports/      # Custom directory
       wb contacts export-all --contact-type Client     # Only clients
+      wb contacts export-all --full                    # Force full rebuild
       wb contacts export-all --dry-run                 # Preview what would export
     """
     import os
     import re as re_mod
+    from datetime import datetime, timezone
 
-    from .export import ExportCache, _slugify, export_contact_to_markdown
+    from .export import (
+        ExportCache,
+        ExportMetadata,
+        _slugify,
+        export_contact_to_markdown,
+        find_dirty_contacts,
+    )
 
     # Create output directory if needed
     if not dry_run:
@@ -278,24 +292,74 @@ def export_all_contacts(
     # Initialize cache for efficiency
     cache = ExportCache()
 
+    # Load export metadata for incremental mode
+    meta = ExportMetadata.load(output_dir)
+    dirty_ids: set[int] | None = None
+
+    if incremental and meta.last_export is not None:
+        click.echo(f"Last export: {meta.last_export.isoformat()}")
+        click.echo("Detecting changes...")
+        dirty_ids = find_dirty_contacts(
+            client, meta.last_export, cache,
+            comment_lookback_days=comment_lookback_days,
+        )
+        if dirty_ids is not None:
+            click.echo(f"Found {len(dirty_ids)} dirty contact(s)")
+        else:
+            click.echo("First export — exporting all contacts")
+    elif not incremental:
+        click.echo("Full export mode — exporting all contacts")
+        dirty_ids = None
+    else:
+        click.echo("No previous export found — exporting all contacts")
+
     # Track which contact IDs we've already exported (as household members)
     exported_ids: set[int] = set()
-    stats = {"households": 0, "persons": 0, "trusts": 0, "organizations": 0, "skipped": 0, "errors": 0}
+    stats = {
+        "households": 0, "persons": 0, "trusts": 0, "organizations": 0,
+        "skipped": 0, "skipped_clean": 0, "errors": 0, "updated": 0,
+    }
+
+    def _is_dirty(contact_id: int, members: list[dict[str, Any]] | None = None) -> bool:
+        """Check if a contact needs re-export."""
+        if dirty_ids is None:
+            return True  # Full export or first run
+        if contact_id in dirty_ids:
+            return True
+        # Check if any household member is dirty
+        if members:
+            for member in members:
+                mid = member.get("id") or member.get("contact", {}).get("id")
+                if mid and mid in dirty_ids:
+                    return True
+        return False
 
     def do_export(contact: dict[str, Any], phase: str) -> None:
         """Export a single contact and track its members."""
         contact_id = contact["id"]
         name = contact.get("name", f"contact-{contact_id}")
+        members = contact.get("members", [])
 
         if contact_id in exported_ids:
             stats["skipped"] += 1
+            return
+
+        # Check if this contact needs re-export (incremental mode)
+        if not _is_dirty(contact_id, members):
+            stats["skipped_clean"] += 1
+            exported_ids.add(contact_id)
+            # Still track household members so we don't re-export them
+            for member in members:
+                member_id = member.get("id") or member.get("contact", {}).get("id")
+                if member_id:
+                    exported_ids.add(member_id)
             return
 
         if dry_run:
             click.echo(f"  [{phase}] Would export: {name} (ID: {contact_id})")
             exported_ids.add(contact_id)
             # Track household members
-            for member in contact.get("members", []):
+            for member in members:
                 member_id = member.get("id") or member.get("contact", {}).get("id")
                 if member_id:
                     exported_ids.add(member_id)
@@ -315,9 +379,13 @@ def export_all_contacts(
 
             click.echo(f"  [{phase}] {name} -> {filename}")
             exported_ids.add(contact_id)
+            stats["updated"] += 1
+
+            # Track in metadata
+            meta.contact_files[contact_id] = filename
 
             # Track household members so we don't re-export them
-            for member in contact.get("members", []):
+            for member in members:
                 member_id = member.get("id") or member.get("contact", {}).get("id")
                 if member_id:
                     exported_ids.add(member_id)
@@ -374,13 +442,21 @@ def export_all_contacts(
         do_export(org, "Org")
         stats["organizations"] += 1
 
+    # Save metadata
+    if not dry_run:
+        meta.last_export = datetime.now(timezone.utc)
+        meta.save(output_dir)
+
     # Summary
     click.echo("\n=== Summary ===")
     click.echo(f"Households:    {stats['households']}")
     click.echo(f"Persons:       {stats['persons']}")
     click.echo(f"Trusts:        {stats['trusts']}")
     click.echo(f"Organizations: {stats['organizations']}")
-    click.echo(f"Skipped:       {stats['skipped']}")
+    click.echo(f"Skipped (dup): {stats['skipped']}")
+    if stats["skipped_clean"]:
+        click.echo(f"Skipped (clean): {stats['skipped_clean']}")
     if stats["errors"]:
         click.echo(f"Errors:        {stats['errors']}")
-    click.echo(f"Total exported: {len(exported_ids)}")
+    click.echo(f"Files updated: {stats['updated']}")
+    click.echo(f"Total contacts: {len(exported_ids)}")

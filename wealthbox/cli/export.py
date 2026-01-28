@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json as _json
+import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from typing import Any
 
@@ -59,6 +61,150 @@ class ExportCache:
         if self.all_opportunities is None:
             self.all_opportunities = client.get_opportunities()
         return self.all_opportunities
+
+
+# ---------------------------------------------------------------------------
+# Export metadata for incremental updates
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExportMetadata:
+    """Tracks export state for incremental updates.
+
+    Stores the last export timestamp and a mapping of contact IDs to their
+    output filenames so incremental exports can skip unchanged contacts.
+    """
+
+    last_export: datetime | None = None
+    contact_files: dict[int, str] = field(default_factory=dict)
+    version: int = 1
+
+    META_FILENAME = ".export-meta.json"
+
+    @classmethod
+    def load(cls, output_dir: str) -> ExportMetadata:
+        """Load metadata from .export-meta.json in the output directory."""
+        path = os.path.join(output_dir, cls.META_FILENAME)
+        if not os.path.exists(path):
+            return cls()
+        try:
+            with open(path) as f:
+                data = _json.load(f)
+            last_export = None
+            if data.get("last_export"):
+                last_export = datetime.fromisoformat(data["last_export"])
+            contact_files = {
+                int(k): v for k, v in data.get("contact_files", {}).items()
+            }
+            return cls(
+                last_export=last_export,
+                contact_files=contact_files,
+                version=data.get("version", 1),
+            )
+        except (OSError, ValueError, KeyError):
+            return cls()
+
+    def save(self, output_dir: str) -> None:
+        """Save metadata to .export-meta.json in the output directory."""
+        path = os.path.join(output_dir, self.META_FILENAME)
+        data = {
+            "last_export": self.last_export.isoformat() if self.last_export else None,
+            "version": self.version,
+            "contact_files": {str(k): v for k, v in self.contact_files.items()},
+        }
+        with open(path, "w") as f:
+            _json.dump(data, f, indent=2)
+            f.write("\n")
+
+
+# ---------------------------------------------------------------------------
+# Dirty-contact detection for incremental exports
+# ---------------------------------------------------------------------------
+
+
+def _is_after(date_str: str | None, threshold: datetime) -> bool:
+    """Check if a WealthBox date string is after the given threshold."""
+    dt = _parse_wb_date(date_str)
+    if dt is None:
+        return False
+    # Normalize both to UTC-naive for consistent comparison
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    threshold_naive = threshold
+    if threshold_naive.tzinfo is not None:
+        threshold_naive = threshold_naive.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt > threshold_naive
+
+
+def _collect_linked_ids(item: dict[str, Any]) -> set[int]:
+    """Extract contact IDs from an item's linked_to list."""
+    ids: set[int] = set()
+    for link in item.get("linked_to", []):
+        if isinstance(link, dict) and "id" in link:
+            ids.add(link["id"])
+    return ids
+
+
+def find_dirty_contacts(
+    client: Any,
+    last_export: datetime | None,
+    cache: ExportCache,
+    comment_lookback_days: int = 30,
+) -> set[int] | None:
+    """Identify contacts that need re-export since last_export.
+
+    Returns a set of contact IDs that have changed, or None to signal
+    that all contacts should be exported (first run).
+    """
+    if last_export is None:
+        return None  # First run — export everything
+
+    dirty: set[int] = set()
+
+    # 1. Contacts updated since last export (API-supported filter)
+    updated_contacts = client.get_contacts(
+        filters={"updated_since": last_export.isoformat()}
+    )
+    for c in updated_contacts:
+        dirty.add(c["id"])
+        # If contact belongs to a household, mark it dirty too
+        hh = c.get("household")
+        if isinstance(hh, dict) and hh.get("id"):
+            dirty.add(hh["id"])
+
+    # 2. Tasks created since last export
+    for task in cache.get_all_tasks(client):
+        if _is_after(task.get("created_at"), last_export):
+            dirty.update(_collect_linked_ids(task))
+
+    # 3. Opportunities created since last export
+    for opp in cache.get_all_opportunities(client):
+        if _is_after(opp.get("created_at"), last_export):
+            dirty.update(_collect_linked_ids(opp))
+
+    # 4. Comments on recent tasks (within lookback window)
+    lookback_cutoff = last_export - timedelta(days=comment_lookback_days)
+    for task in cache.get_all_tasks(client):
+        task_date = _parse_wb_date(task.get("created_at"))
+        if task_date is None:
+            continue
+        # Normalize for comparison
+        if task_date.tzinfo is not None:
+            task_date = task_date.astimezone(timezone.utc).replace(tzinfo=None)
+        lookback_naive = lookback_cutoff
+        if lookback_naive.tzinfo is not None:
+            lookback_naive = lookback_naive.astimezone(timezone.utc).replace(tzinfo=None)
+        if task_date < lookback_naive:
+            continue
+        # Check comments on this recent task
+        comments = cache.get_task_comments(client, task["id"])
+        for comment in comments:
+            if _is_after(comment.get("created_at"), last_export):
+                dirty.update(_collect_linked_ids(task))
+                break  # One new comment is enough to mark dirty
+
+    return dirty
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,11 @@ def cli(
       wb contacts get 12345
 
     \b
+    Export contacts to markdown:
+      wb contacts export 12345 --stdout     # Single contact
+      wb contacts export-all -o ./exports/  # All contacts
+
+    \b
     AI agent usage:
       wb --readonly contacts list --json    # Safe read-only access
       wb contacts create --first-name John  # Write (needs explicit permission)
