@@ -1627,3 +1627,129 @@ class TestCollapseNewlines:
         # Should be compacted — no blank lines between structured fields
         assert "\n\n" not in result
         assert "Contact number\n+1 (555) 123-4567" in result
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: export-all command
+# ---------------------------------------------------------------------------
+
+
+class TestExportAllCommand:
+    @responses.activate
+    def test_export_all_dry_run(self, runner, mock_token):
+        """Dry run lists contacts without creating files."""
+        # Households
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [
+                    {"id": 200, "name": "Smith Household", "type": "Household", "members": [{"id": 101}]},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Persons
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [
+                    {"id": 101, "name": "John Smith", "type": "Person"},
+                    {"id": 102, "name": "Solo Person", "type": "Person"},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Trusts
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        # Organizations
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        result = runner.invoke(cli, ["contacts", "export-all", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Phase 1: Households" in result.output
+        assert "Would export: Smith Household" in result.output
+        assert "Phase 2: Individual Persons" in result.output
+        # John Smith (id 101) should be skipped — he's in the household
+        # Solo Person (id 102) should be listed
+        assert "Would export: Solo Person" in result.output
+        assert "Phase 3: Trusts & Organizations" in result.output
+
+    @responses.activate
+    def test_export_all_tracks_household_members(self, runner, mock_token, tmp_path):
+        """Household members are tracked so they're not exported twice."""
+        # Households — with members in API response
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [
+                    {
+                        "id": 200,
+                        "name": "Smith Household",
+                        "type": "Household",
+                        "members": [
+                            {"id": 101, "type": "Person"},
+                            {"id": 102, "type": "Person"},
+                        ],
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Persons — includes household members and a solo person
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [
+                    {"id": 101, "name": "John Smith", "type": "Person"},
+                    {"id": 102, "name": "Jane Smith", "type": "Person"},
+                    {"id": 300, "name": "Solo Person", "type": "Person"},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        # Trusts + Orgs — empty
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        result = runner.invoke(cli, ["contacts", "export-all", "--dry-run"])
+        assert result.exit_code == 0, result.output
+
+        # Phase 2 should only list Solo Person (300)
+        # John (101) and Jane (102) are in the household
+        assert "1 not in households" in result.output
+        # Count how many times "Would export" appears in Phase 2
+        lines = result.output.split("\n")
+        phase2_start = next(i for i, l in enumerate(lines) if "Phase 2" in l)
+        phase3_start = next(i for i, l in enumerate(lines) if "Phase 3" in l)
+        phase2_lines = lines[phase2_start:phase3_start]
+        phase2_exports = [l for l in phase2_lines if "Would export" in l]
+        assert len(phase2_exports) == 1
+        assert "Solo Person" in phase2_exports[0]
