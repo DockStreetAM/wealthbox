@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "wealthbox"
-version = "0.9.0"
+version = "0.9.1"
 description = ""
 authors = ["spencerogden-dsam <67068943+spencerogden-dsam@users.noreply.github.com>"]
 
@@ -20,11 +20,9 @@ cli = ["click", "rich", "python-dotenv"]
 [tool.poetry.scripts]
 wb = "wealthbox.cli.main:cli"
 
-[tool.poetry.dev-dependencies]
+[tool.poetry.group.dev.dependencies]
 pytest = "^5.2"
 responses = "^0.25.0"
-
-[tool.poetry.group.dev.dependencies]
 python-semantic-release = "^9.4.1"
 click = "^8.0"
 rich = "^13.0"
