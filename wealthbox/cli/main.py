@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
-import click
+try:
+    import click
+except ImportError:
+    import sys
+    print("Error: CLI dependencies not installed.", file=sys.stderr)
+    print("Install with: pip install 'wealthbox[cli]'", file=sys.stderr)
+    sys.exit(1)
 
 from wealthbox import __version__
 

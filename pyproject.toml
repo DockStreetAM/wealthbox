@@ -26,8 +26,6 @@ responses = "^0.25.0"
 
 [tool.poetry.group.dev.dependencies]
 python-semantic-release = "^9.4.1"
-
-[tool.poetry.group.cli.dependencies]
 click = "^8.0"
 rich = "^13.0"
 python-dotenv = "^1.0"
