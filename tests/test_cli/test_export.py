@@ -10,6 +10,8 @@ from click.testing import CliRunner
 
 from wealthbox.cli.export import (
     _escape_yaml,
+    _extract_body,
+    _fetch_household_members,
     _format_date,
     _format_datetime,
     _html_to_markdown,
@@ -288,6 +290,49 @@ class TestRenderComments:
         result = _render_comments(comments)
         assert result == ""
 
+    def test_comment_with_dict_body(self):
+        """WealthBox returns body as {"html": "...", "text": "..."}."""
+        comments = [
+            {
+                "creator": "Spencer",
+                "created_at": "2026-01-27",
+                "body": {"html": "<div>Great call.</div>", "text": "Great call."},
+            },
+        ]
+        result = _render_comments(comments)
+        assert "> **Spencer** (2026-01-27): Great call." in result
+
+    def test_comment_with_dict_body_html_tags(self):
+        comments = [
+            {
+                "creator": "X",
+                "created_at": "2026-01-01",
+                "body": {"html": "<b>Important</b> update", "text": "Important update"},
+            },
+        ]
+        result = _render_comments(comments)
+        assert "**Important** update" in result
+
+
+class TestExtractBody:
+    def test_string_passthrough(self):
+        assert _extract_body("hello") == "hello"
+
+    def test_dict_prefers_html(self):
+        assert _extract_body({"html": "<b>hi</b>", "text": "hi"}) == "<b>hi</b>"
+
+    def test_dict_falls_back_to_text(self):
+        assert _extract_body({"text": "hi"}) == "hi"
+
+    def test_empty_dict(self):
+        assert _extract_body({}) == ""
+
+    def test_none(self):
+        assert _extract_body(None) == ""
+
+    def test_empty_string(self):
+        assert _extract_body("") == ""
+
 
 # ---------------------------------------------------------------------------
 # Unit tests: _render_note
@@ -459,7 +504,7 @@ class TestRenderOpportunity:
             "name": "Retirement Planning",
             "amount": 500000,
             "stage_name": "Closed Won",
-            "close_date": "2026-06-01",
+            "target_close": "2026-06-01",
         }
         result = _render_opportunity(opp)
         assert "### Opportunity — Retirement Planning ($500,000) — 2026-06-01" in result
@@ -467,7 +512,7 @@ class TestRenderOpportunity:
         assert "Close Date: 2026-06-01" in result
 
     def test_opportunity_no_amount(self):
-        opp = {"name": "Lead", "close_date": "2026-03-01"}
+        opp = {"name": "Lead", "target_close": "2026-03-01"}
         result = _render_opportunity(opp)
         assert "### Opportunity — Lead — 2026-03-01" in result
         assert "$" not in result
@@ -476,10 +521,52 @@ class TestRenderOpportunity:
         opp = {
             "name": "Deal",
             "stage": {"name": "Proposal"},
-            "close_date": "2026-01-01",
+            "target_close": "2026-01-01",
         }
         result = _render_opportunity(opp)
         assert "Stage: Proposal" in result
+
+    def test_stage_integer_omitted(self):
+        """Bug 3: stage is an int ID (e.g. 144686) — should not render."""
+        opp = {"name": "Deal", "stage": 144686, "target_close": "2026-01-01"}
+        result = _render_opportunity(opp)
+        assert "Stage" not in result
+        assert "144686" not in result
+
+    def test_amounts_array(self):
+        """Bug 4: amount lives in amounts array, not top-level amount."""
+        opp = {
+            "name": "Fee Review",
+            "amounts": [{"amount": "$500", "kind": "Fee"}],
+            "target_close": "2026-03-01",
+        }
+        result = _render_opportunity(opp)
+        assert "($500)" in result
+
+    def test_amounts_array_multiple(self):
+        """Bug 4: when multiple amounts, first entry is used."""
+        opp = {
+            "name": "Multi",
+            "amounts": [
+                {"amount": "$1,000", "kind": "AUM"},
+                {"amount": "$200", "kind": "Fee"},
+            ],
+        }
+        result = _render_opportunity(opp)
+        assert "($1,000)" in result
+
+    def test_fallback_to_top_level_amount(self):
+        """amounts array empty → fall back to top-level amount."""
+        opp = {"name": "Old", "amount": 250000, "target_close": "2026-01-01"}
+        result = _render_opportunity(opp)
+        assert "($250,000)" in result
+
+    def test_target_close_date(self):
+        """Bug 5: date field is target_close, not close_date."""
+        opp = {"name": "Opp", "target_close": "2026-06-15"}
+        result = _render_opportunity(opp)
+        assert "2026-06-15" in result
+        assert "Close Date: 2026-06-15" in result
 
 
 # ---------------------------------------------------------------------------
@@ -816,7 +903,7 @@ class TestResolveHousehold:
             "id": 200,
             "name": "Smith Household",
             "type": "Household",
-            "household_members": [
+            "members": [
                 {"contact": {"id": 101, "name": "John Smith"}},
                 {"contact": {"id": 102, "name": "Jane Smith"}},
             ],
@@ -849,7 +936,7 @@ class TestResolveHousehold:
             "id": 200,
             "name": "Smith Household",
             "type": "Household",
-            "household_members": [
+            "members": [
                 {"contact": {"id": 101, "name": "John Smith"}},
                 {"contact": {"id": 102, "name": "Jane Smith"}},
             ],
@@ -889,7 +976,7 @@ class TestResolveHousehold:
             "id": 200,
             "name": "HH",
             "type": "Household",
-            "household_members": [
+            "members": [
                 {"contact": {"id": 101}},
                 {"contact": {"id": 102}},
             ],
@@ -942,3 +1029,181 @@ class TestResolveHousehold:
         assert result.exit_code == 0, result.output
         # The note should appear exactly once
         assert result.output.count("Shared note") == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Bug 1 — household members key is "members"
+# ---------------------------------------------------------------------------
+
+
+class TestFetchHouseholdMembers:
+    @responses.activate
+    def test_members_key(self):
+        """Bug 1: API uses 'members' key, not 'household_members'."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/101",
+            json={"id": 101, "name": "John", "type": "Person"},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/102",
+            json={"id": 102, "name": "Jane", "type": "Person"},
+            status=200,
+        )
+
+        household = {
+            "id": 200,
+            "name": "Smith HH",
+            "type": "Household",
+            "members": [
+                {"contact": {"id": 101}},
+                {"contact": {"id": 102}},
+            ],
+        }
+        members = _fetch_household_members(client, household)
+        assert len(members) == 2
+        assert members[0]["name"] == "John"
+        assert members[1]["name"] == "Jane"
+
+    @responses.activate
+    def test_old_key_returns_empty(self):
+        """If data only has the old 'household_members' key, returns empty."""
+        from wealthbox import WealthBox
+
+        client = WealthBox(token="test")
+
+        household = {
+            "id": 200,
+            "name": "Smith HH",
+            "type": "Household",
+            "household_members": [
+                {"contact": {"id": 101}},
+            ],
+        }
+        members = _fetch_household_members(client, household)
+        assert len(members) == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Bug 2 — opportunities filtered by linked_to
+# ---------------------------------------------------------------------------
+
+
+class TestOpportunitiesFiltering:
+    @responses.activate
+    def test_only_linked_opps_exported(self, runner, mock_token):
+        """Bug 2: only opps whose linked_to includes a member should appear."""
+        contact = {"id": 1, "name": "Test Client", "type": "Person"}
+        _register_single_contact(1, contact)
+        _register_users_endpoint()
+
+        # Notes, tasks, events, workflows — all empty
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={"status_updates": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}events",
+            json={"events": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+        for _ in range(3):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}workflows",
+                json={"workflows": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+
+        # Opportunities — mix of linked and unlinked
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}opportunities",
+            json={
+                "opportunities": [
+                    {
+                        "id": 10,
+                        "name": "Linked Opp",
+                        "linked_to": [{"id": 1, "type": "Contact"}],
+                        "target_close": "2026-06-01",
+                    },
+                    {
+                        "id": 11,
+                        "name": "Unrelated Opp",
+                        "linked_to": [{"id": 999, "type": "Contact"}],
+                        "target_close": "2026-07-01",
+                    },
+                    {
+                        "id": 12,
+                        "name": "No Links Opp",
+                        "target_close": "2026-08-01",
+                    },
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+
+        result = runner.invoke(cli, ["contacts", "export", "1", "--stdout"])
+        assert result.exit_code == 0, result.output
+        assert "Linked Opp" in result.output
+        assert "Unrelated Opp" not in result.output
+        assert "No Links Opp" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: Bug 5 — timeline uses target_close for opportunities
+# ---------------------------------------------------------------------------
+
+
+class TestTimelineTargetClose:
+    def test_opportunity_uses_target_close(self):
+        """Bug 5: timeline sorts opps by target_close, not close_date."""
+        activity = {
+            "notes": [],
+            "tasks": [],
+            "events": [],
+            "workflows": [],
+            "opportunities": [
+                {"id": 1, "name": "Early", "target_close": "2026-01-01"},
+                {"id": 2, "name": "Late", "target_close": "2026-12-01"},
+            ],
+        }
+        timeline = _merge_activity_timeline(activity)
+        assert len(timeline) == 2
+        # Late should come first (reverse chronological)
+        assert timeline[0]["name"] == "Late"
+        assert timeline[1]["name"] == "Early"
+
+    def test_close_date_ignored(self):
+        """Bug 5: close_date field should NOT be used for sorting."""
+        activity = {
+            "notes": [],
+            "tasks": [],
+            "events": [],
+            "workflows": [],
+            "opportunities": [
+                {"id": 1, "name": "Has target", "target_close": "2026-06-01"},
+                {"id": 2, "name": "Old field only", "close_date": "2026-12-01"},
+            ],
+        }
+        timeline = _merge_activity_timeline(activity)
+        # "Has target" sorts to 2026-06-01; "Old field only" has no
+        # target_close so falls back to created_at (missing) → datetime.min
+        assert timeline[0]["name"] == "Has target"
+        assert timeline[1]["name"] == "Old field only"

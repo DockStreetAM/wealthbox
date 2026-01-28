@@ -201,7 +201,7 @@ def _fetch_household_members(
 ) -> list[dict[str, Any]]:
     """Fetch individual member contacts from a household contact."""
     members: list[dict[str, Any]] = []
-    for member_ref in household_contact.get("household_members", []):
+    for member_ref in household_contact.get("members", []):
         # Handle both {"contact": {"id": N}} and {"id": N} shapes
         inner = member_ref.get("contact", member_ref)
         member_id = inner.get("id") if isinstance(inner, dict) else None
@@ -218,6 +218,7 @@ def _fetch_all_activity(
     client: Any,
     members: list[dict[str, Any]],
     user_map: dict[int, str],
+    household_id: int | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Fetch all activity types for every member, deduplicating by ID."""
     seen_notes: set[int] = set()
@@ -231,6 +232,10 @@ def _fetch_all_activity(
     all_events: list[dict[str, Any]] = []
     all_workflows: list[dict[str, Any]] = []
     all_opps: list[dict[str, Any]] = []
+
+    member_ids = {m["id"] for m in members}
+    if household_id is not None:
+        member_ids.add(household_id)
 
     for member in members:
         member_id = member["id"]
@@ -264,11 +269,13 @@ def _fetch_all_activity(
                 seen_workflows.add(wf["id"])
                 all_workflows.append(wf)
 
-        # Opportunities
-        for opp in client.get_opportunities(resource_id=member_id):
-            if opp["id"] not in seen_opps:
-                seen_opps.add(opp["id"])
-                all_opps.append(opp)
+    # Opportunities — API ignores resource_id, so fetch all once and
+    # filter client-side by linked_to contacts
+    for opp in client.get_opportunities():
+        linked_ids = {link["id"] for link in opp.get("linked_to", []) if isinstance(link, dict)}
+        if linked_ids & member_ids and opp["id"] not in seen_opps:
+            seen_opps.add(opp["id"])
+            all_opps.append(opp)
 
     return {
         "notes": client.enhance_user_info(all_notes, user_map),
@@ -294,7 +301,7 @@ def _merge_activity_timeline(
         "tasks": ("task", "due_date"),
         "events": ("event", "starts_at"),
         "workflows": ("workflow", "created_at"),
-        "opportunities": ("opportunity", "close_date"),
+        "opportunities": ("opportunity", "target_close"),
     }
 
     for key, (activity_type, primary_date_field) in _DATE_FIELDS.items():
@@ -454,6 +461,16 @@ def _render_contact_info(members: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _extract_body(body_field: Any) -> str:
+    """Extract text from a body field that may be a string or a dict."""
+    if isinstance(body_field, dict):
+        # WealthBox returns {"html": "...", "text": "..."} for comment bodies
+        return body_field.get("html", body_field.get("text", ""))
+    if isinstance(body_field, str):
+        return body_field
+    return ""
+
+
 def _render_comments(comments: list[dict[str, Any]]) -> str:
     """Render comments as blockquotes."""
     if not comments:
@@ -462,7 +479,8 @@ def _render_comments(comments: list[dict[str, Any]]) -> str:
     for comment in comments:
         creator = comment.get("creator", "Unknown")
         date = _format_date(comment.get("created_at", ""))
-        body = comment.get("body", "").strip()
+        raw_body = _extract_body(comment.get("body", ""))
+        body = _html_to_markdown(raw_body).strip() if raw_body else ""
         if body:
             date_part = f" ({date})" if date else ""
             lines.append(f"> **{creator}**{date_part}: {body}")
@@ -477,7 +495,7 @@ def _render_note(note: dict[str, Any]) -> str:
     lines.append(f"*By: {creator}*")
     lines.append("")
 
-    content = note.get("content", note.get("body", ""))
+    content = _extract_body(note.get("content", note.get("body", "")))
     if content:
         lines.append(_html_to_markdown(content))
 
@@ -573,15 +591,23 @@ def _render_workflow(wf: dict[str, Any]) -> str:
 
 def _render_opportunity(opp: dict[str, Any]) -> str:
     name = opp.get("name", "Untitled Opportunity")
-    amount = opp.get("amount") or opp.get("value")
-    date = _format_date(opp.get("close_date") or opp.get("created_at", ""))
+    date = _format_date(opp.get("target_close") or opp.get("created_at", ""))
 
+    # Amount: prefer amounts array (API returns [{amount: "$100", kind: "Fee"}]),
+    # fall back to top-level amount/value for backwards compatibility
     amount_str = ""
-    if amount:
-        try:
-            amount_str = f" (${float(amount):,.0f})"
-        except (ValueError, TypeError):
-            amount_str = f" ({amount})"
+    amounts = opp.get("amounts", [])
+    if amounts and isinstance(amounts, list):
+        first = amounts[0].get("amount", "") if isinstance(amounts[0], dict) else ""
+        if first:
+            amount_str = f" ({first})"
+    if not amount_str:
+        amount = opp.get("amount") or opp.get("value")
+        if amount:
+            try:
+                amount_str = f" (${float(amount):,.0f})"
+            except (ValueError, TypeError):
+                amount_str = f" ({amount})"
 
     lines = [f"### Opportunity — {name}{amount_str} — {date}"]
 
@@ -590,9 +616,11 @@ def _render_opportunity(opp: dict[str, Any]) -> str:
     if stage:
         if isinstance(stage, dict):
             stage = stage.get("name", "")
-        meta_parts.append(f"Stage: {stage}")
-    if opp.get("close_date"):
-        meta_parts.append(f"Close Date: {_format_date(opp['close_date'])}")
+        # Skip integer stage IDs — no stage-name lookup available
+        if not isinstance(stage, int):
+            meta_parts.append(f"Stage: {stage}")
+    if opp.get("target_close"):
+        meta_parts.append(f"Close Date: {_format_date(opp['target_close'])}")
     if meta_parts:
         lines.append(f'*{" | ".join(meta_parts)}*')
 
@@ -638,7 +666,8 @@ def export_contact_to_markdown(client: Any, contact_id: int) -> str:
 
     user_map = client.make_user_map("name")
 
-    activity = _fetch_all_activity(client, members, user_map)
+    hh_id = hh_info["id"] if hh_info else None
+    activity = _fetch_all_activity(client, members, user_map, household_id=hh_id)
 
     timeline = _merge_activity_timeline(activity)
 
