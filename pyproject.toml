@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "wealthbox"
-version = "0.8.0"
+version = "0.9.0"
 description = ""
 authors = ["spencerogden-dsam <67068943+spencerogden-dsam@users.noreply.github.com>"]
 
