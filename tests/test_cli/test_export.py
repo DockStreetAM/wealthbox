@@ -835,14 +835,14 @@ class TestExportCommand:
             json={"status_updates": [], "meta": {"total_pages": 1}},
             status=200,
         )
-        # Tasks — includes completed and incomplete
+        # Tasks — includes completed and incomplete, linked to contact
         responses.add(
             responses.GET,
             f"{BASE_URL}tasks",
             json={
                 "tasks": [
-                    {"id": 10, "name": "Open task", "completed": False, "due_date": "2026-02-01"},
-                    {"id": 11, "name": "Done task", "completed": True, "due_date": "2026-01-15"},
+                    {"id": 10, "name": "Open task", "completed": False, "due_date": "2026-02-01", "linked_to": [{"id": 1, "type": "Contact"}]},
+                    {"id": 11, "name": "Done task", "completed": True, "due_date": "2026-01-15", "linked_to": [{"id": 1, "type": "Contact"}]},
                 ],
                 "meta": {"total_pages": 1},
             },
