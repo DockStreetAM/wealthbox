@@ -201,25 +201,32 @@ def delete_contact(client, contact_id: int, confirm: bool) -> None:
 @click.argument("contact_id", type=int)
 @click.option("--output", "-o", "output_file", type=str, default=None, help="Write to specific file path")
 @click.option("--stdout", is_flag=True, help="Print to terminal instead of writing file")
+@click.option("--workspace-id", type=int, default=None, help="Wealthbox workspace ID for generating deep links")
 @pass_client(write=False)
-def export_contact(client, contact_id: int, output_file: str | None, stdout: bool) -> None:
+def export_contact(
+    client, contact_id: int, output_file: str | None, stdout: bool, workspace_id: int | None
+) -> None:
     """Export a contact to markdown with full activity timeline.
 
     Exports the contact (and their household) to a QMD-compatible markdown
     file with frontmatter metadata, contact info, and a unified activity
     timeline including notes, tasks, events, workflows, and opportunities.
 
+    If --workspace-id is provided, activity items will include clickable
+    links to view them directly in Wealthbox.
+
     \b
     Examples:
-      wb contacts export 12345 --stdout          # Print to terminal
-      wb contacts export 12345                    # Auto-named file
-      wb contacts export 12345 -o client.md       # Specific file
+      wb contacts export 12345 --stdout                    # Print to terminal
+      wb contacts export 12345                              # Auto-named file
+      wb contacts export 12345 -o client.md                 # Specific file
+      wb contacts export 12345 --workspace-id 15708         # With deep links
     """
     import re as re_mod
 
     from .export import _slugify, export_contact_to_markdown
 
-    markdown = export_contact_to_markdown(client, contact_id)
+    markdown = export_contact_to_markdown(client, contact_id, workspace_id=workspace_id)
 
     if stdout:
         click.echo(markdown)
@@ -241,6 +248,7 @@ def export_contact(client, contact_id: int, output_file: str | None, stdout: boo
 @click.option("--dry-run", is_flag=True, help="Show what would be exported without actually exporting")
 @click.option("--incremental/--full", default=True, help="Only update changed files (default) or force full rebuild")
 @click.option("--comment-lookback-days", type=int, default=30, help="Days to look back for new comments on existing items")
+@click.option("--workspace-id", type=int, default=None, help="Wealthbox workspace ID for generating deep links")
 @pass_client(write=False)
 def export_all_contacts(
     client,
@@ -249,6 +257,7 @@ def export_all_contacts(
     dry_run: bool,
     incremental: bool,
     comment_lookback_days: int,
+    workspace_id: int | None,
 ) -> None:
     """Export all contacts to markdown files in three phases.
 
@@ -260,6 +269,9 @@ def export_all_contacts(
     Incremental mode (default) only re-exports contacts with changes
     since the last export.
 
+    If --workspace-id is provided, activity items will include clickable
+    links to view them directly in Wealthbox.
+
     \b
     Examples:
       wb contacts export-all                           # Incremental update
@@ -267,6 +279,7 @@ def export_all_contacts(
       wb contacts export-all --contact-type Client     # Only clients
       wb contacts export-all --full                    # Force full rebuild
       wb contacts export-all --dry-run                 # Preview what would export
+      wb contacts export-all --workspace-id 15708      # With deep links
     """
     import os
     import re as re_mod
@@ -366,7 +379,9 @@ def export_all_contacts(
             return
 
         try:
-            markdown = export_contact_to_markdown(client, contact_id, cache=cache)
+            markdown = export_contact_to_markdown(
+                client, contact_id, cache=cache, workspace_id=workspace_id
+            )
 
             # Generate filename
             match = re_mod.search(r'^title:\s*"(.+?)"', markdown, re_mod.MULTILINE)

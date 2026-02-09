@@ -755,11 +755,22 @@ def _render_comments(comments: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _render_note(note: dict[str, Any]) -> str:
+def _render_note(
+    note: dict[str, Any],
+    workspace_id: int | None = None,
+    contact_id: int | None = None,
+) -> str:
     date = _format_date(note.get("created_at", ""))
     creator = note.get("creator", "Unknown")
 
     lines = [f"### Note — {date}"]
+
+    # Add Wealthbox link if workspace_id provided
+    note_id = note.get("id")
+    if workspace_id and contact_id and note_id:
+        wb_url = f"https://www.crmworkspace.com/{workspace_id}/contacts/{contact_id}#note-{note_id}"
+        lines.append(f"*[View in Wealthbox]({wb_url})*")
+
     lines.append(f"*By: {creator}*")
     lines.append("")
 
@@ -775,13 +786,23 @@ def _render_note(note: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_task(task: dict[str, Any]) -> str:
+def _render_task(
+    task: dict[str, Any],
+    workspace_id: int | None = None,
+    contact_id: int | None = None,
+) -> str:
     name = task.get("name", "Untitled Task")
     date = _format_date(task.get("due_date") or task.get("created_at", ""))
     completed = task.get("completed", False)
 
     check = " \u2713" if completed else ""
     lines = [f"### Task — {name}{check} — {date}"]
+
+    # Add Wealthbox link if workspace_id provided
+    task_id = task.get("id")
+    if workspace_id and task_id:
+        wb_url = f"https://www.crmworkspace.com/{workspace_id}/tasks?task_id={task_id}"
+        lines.append(f"*[View in Wealthbox]({wb_url})*")
 
     meta_parts: list[str] = []
     if task.get("assigned_to"):
@@ -804,11 +825,21 @@ def _render_task(task: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_event(event: dict[str, Any]) -> str:
+def _render_event(
+    event: dict[str, Any],
+    workspace_id: int | None = None,
+    contact_id: int | None = None,
+) -> str:
     name = event.get("name", "Untitled Event")
     date = _format_date(event.get("starts_at") or event.get("created_at", ""))
 
     lines = [f"### Event — {name} — {date}"]
+
+    # Add Wealthbox link if workspace_id provided
+    event_id = event.get("id")
+    if workspace_id and event_id:
+        wb_url = f"https://www.crmworkspace.com/{workspace_id}/events/{event_id}"
+        lines.append(f"*[View in Wealthbox]({wb_url})*")
 
     meta_parts: list[str] = []
     starts = event.get("starts_at", "")
@@ -834,13 +865,23 @@ def _render_event(event: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_workflow(wf: dict[str, Any]) -> str:
+def _render_workflow(
+    wf: dict[str, Any],
+    workspace_id: int | None = None,
+    contact_id: int | None = None,
+) -> str:
     name = wf.get("name", "Untitled Workflow")
     status = wf.get("status", "")
     date = _format_date(wf.get("created_at", ""))
 
     status_label = f" ({status})" if status else ""
     lines = [f"### Workflow — {name}{status_label} — {date}"]
+
+    # Add Wealthbox link if workspace_id provided
+    wf_id = wf.get("id")
+    if workspace_id and wf_id:
+        wb_url = f"https://www.crmworkspace.com/{workspace_id}/workflows/{wf_id}"
+        lines.append(f"*[View in Wealthbox]({wb_url})*")
 
     steps = wf.get("workflow_steps", [])
     for i, step in enumerate(steps, 1):
@@ -857,7 +898,11 @@ def _render_workflow(wf: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_opportunity(opp: dict[str, Any]) -> str:
+def _render_opportunity(
+    opp: dict[str, Any],
+    workspace_id: int | None = None,
+    contact_id: int | None = None,
+) -> str:
     name = opp.get("name", "Untitled Opportunity")
     date = _format_date(opp.get("target_close") or opp.get("created_at", ""))
 
@@ -879,6 +924,12 @@ def _render_opportunity(opp: dict[str, Any]) -> str:
 
     lines = [f"### Opportunity — {name}{amount_str} — {date}"]
 
+    # Add Wealthbox link if workspace_id provided
+    opp_id = opp.get("id")
+    if workspace_id and opp_id:
+        wb_url = f"https://www.crmworkspace.com/{workspace_id}/opportunities/{opp_id}"
+        lines.append(f"*[View in Wealthbox]({wb_url})*")
+
     meta_parts: list[str] = []
     stage = opp.get("stage_name") or opp.get("stage")
     if stage:
@@ -895,8 +946,18 @@ def _render_opportunity(opp: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _render_timeline(timeline: list[dict[str, Any]]) -> str:
-    """Render the full unified activity timeline."""
+def _render_timeline(
+    timeline: list[dict[str, Any]],
+    workspace_id: int | None = None,
+    contact_id: int | None = None,
+) -> str:
+    """Render the full unified activity timeline.
+
+    Args:
+        timeline: List of activity items to render.
+        workspace_id: Optional Wealthbox workspace ID for generating links.
+        contact_id: Optional contact ID for note links.
+    """
     if not timeline:
         return ""
 
@@ -913,7 +974,7 @@ def _render_timeline(timeline: list[dict[str, Any]]) -> str:
         renderer = _RENDERERS.get(item.get("_activity_type", ""))
         if renderer:
             parts.append("---\n")
-            parts.append(renderer(item))
+            parts.append(renderer(item, workspace_id=workspace_id, contact_id=contact_id))
             parts.append("")
 
     return "\n".join(parts)
@@ -927,6 +988,7 @@ def export_contact_to_markdown(
     client: Any,
     contact_id: int,
     cache: ExportCache | None = None,
+    workspace_id: int | None = None,
 ) -> str:
     """Export a contact (and its household) to QMD-compatible markdown.
 
@@ -936,6 +998,9 @@ def export_contact_to_markdown(
         cache: Optional ExportCache to reuse firm-wide data across exports.
             Pass the same cache instance when exporting multiple contacts
             to significantly reduce API calls.
+        workspace_id: Optional Wealthbox workspace ID. If provided, activity
+            items will include clickable links to view them in Wealthbox.
+            Example: 15708 for Dock Street.
 
     Returns the full markdown string.
     """
@@ -961,7 +1026,9 @@ def export_contact_to_markdown(
     parts.append("")
     parts.append(_render_contact_info(members))
 
-    timeline_str = _render_timeline(timeline)
+    timeline_str = _render_timeline(
+        timeline, workspace_id=workspace_id, contact_id=contact_id
+    )
     if timeline_str:
         parts.append(timeline_str)
 
