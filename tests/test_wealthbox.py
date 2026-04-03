@@ -1209,3 +1209,106 @@ class TestHouseholdMembersEndpoints:
         result = wb.remove_household_member(100, 200)
 
         assert result is True
+
+    @responses.activate
+    def test_add_household_member_invalid_contact(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}household_members",
+            json={"error": "Invalid contact"},
+            status=422
+        )
+
+        with pytest.raises(WealthBoxAPIError) as exc_info:
+            wb.add_household_member(100, 999)
+        assert exc_info.value.response == {"error": "Invalid contact"}
+
+    @responses.activate
+    def test_add_household_member_not_found(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}household_members",
+            json={"error": "Not found"},
+            status=404
+        )
+
+        with pytest.raises(WealthBoxAPIError):
+            wb.add_household_member(999, 200)
+
+    @responses.activate
+    def test_add_household_member_rate_limit(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}household_members",
+            json={},
+            status=429,
+            headers={"Retry-After": "5"}
+        )
+
+        with pytest.raises(WealthBoxRateLimitError) as exc_info:
+            wb.add_household_member(100, 200)
+        assert exc_info.value.retry_after == 5
+
+    @responses.activate
+    def test_add_household_member_non_json_error(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}household_members",
+            body="Internal Server Error",
+            status=500,
+            content_type="text/plain"
+        )
+
+        with pytest.raises(WealthBoxResponseError):
+            wb.add_household_member(100, 200)
+
+    @responses.activate
+    def test_remove_household_member_not_found(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}household_members/100/999",
+            json={"error": "Not found"},
+            status=404
+        )
+
+        with pytest.raises(WealthBoxAPIError):
+            wb.remove_household_member(100, 999)
+
+    @responses.activate
+    def test_remove_household_member_rate_limit(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}household_members/100/200",
+            json={},
+            status=429,
+            headers={"Retry-After": "10"}
+        )
+
+        with pytest.raises(WealthBoxRateLimitError) as exc_info:
+            wb.remove_household_member(100, 200)
+        assert exc_info.value.retry_after == 10
+
+    @responses.activate
+    def test_remove_household_member_non_json_error(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}household_members/100/200",
+            body="Server Error",
+            status=500,
+            content_type="text/plain"
+        )
+
+        with pytest.raises(WealthBoxAPIError):
+            wb.remove_household_member(100, 200)
+
+    @responses.activate
+    def test_remove_household_member_returns_true_on_200(self, wb):
+        responses.add(
+            responses.DELETE,
+            f"{BASE_URL}household_members/100/200",
+            status=200
+        )
+
+        result = wb.remove_household_member(100, 200)
+
+        assert result is True

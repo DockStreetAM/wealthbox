@@ -172,6 +172,11 @@ class WealthBox:
                 f"Failed to decode JSON response: {e}",
                 response_text=res.text
             )
+        if res.status_code >= 400:
+            raise WealthBoxAPIError(
+                f"Request failed with status {res.status_code}",
+                response=res_json
+            )
         return res_json
 
     def api_post(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -191,6 +196,11 @@ class WealthBox:
             raise WealthBoxResponseError(
                 f"Failed to decode JSON response: {e}",
                 response_text=res.text
+            )
+        if res.status_code >= 400:
+            raise WealthBoxAPIError(
+                f"Request failed with status {res.status_code}",
+                response=res_json
             )
         return res_json
 
