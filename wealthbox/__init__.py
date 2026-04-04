@@ -82,13 +82,14 @@ def sort_and_limit(
     key: str = "created_at",
 ) -> list[dict[str, Any]]:
     """Sort items by key and optionally cap at limit results."""
-    items.sort(
+    result = sorted(
+        items,
         key=lambda item: item.get(key, ""),
         reverse=(order == "desc"),
     )
     if limit is not None:
-        return items[:limit]
-    return items
+        return result[:limit]
+    return result
 
 
 class WealthBox:
@@ -627,13 +628,9 @@ class WealthBox:
                 date string.
             include_comments: Whether to fetch comments for each note.
         """
-        notes = self.get_notes(resource_id=contact_id)
+        notes = self.get_notes(resource_id=contact_id, since_date=since_date)
 
-        if since_date is not None:
-            notes = filter_by_date(notes, since_date)
-
-        notes.sort(key=lambda n: n.get("created_at", ""), reverse=True)
-        notes = notes[:limit]
+        notes = sort_and_limit(notes, order="desc", limit=limit)
 
         if include_comments:
             for note in notes:
