@@ -41,6 +41,56 @@ class WealthBoxRateLimitError(WealthBoxError):
         self.retry_after = retry_after
 
 
+# ---------------------------------------------------------------------------
+# Filter utilities — work on any list of dicts from the API
+# ---------------------------------------------------------------------------
+
+
+def filter_by_date(
+    items: list[dict[str, Any]],
+    since_date: str,
+    date_fields: tuple[str, ...] = ("created_at", "updated_at"),
+) -> list[dict[str, Any]]:
+    """Keep items where any date_field >= since_date (ISO string comparison)."""
+    return [
+        item
+        for item in items
+        if any(item.get(f, "") >= since_date for f in date_fields)
+    ]
+
+
+def filter_by_tag(
+    items: list[dict[str, Any]],
+    tag: str,
+) -> list[dict[str, Any]]:
+    """Keep items that have a tag matching the given name (case-insensitive)."""
+    tag_lower = tag.lower()
+    return [
+        item
+        for item in items
+        if any(
+            t.get("name", "").lower() == tag_lower
+            for t in item.get("tags", [])
+        )
+    ]
+
+
+def sort_and_limit(
+    items: list[dict[str, Any]],
+    order: str = "desc",
+    limit: int | None = None,
+    key: str = "created_at",
+) -> list[dict[str, Any]]:
+    """Sort items by key and optionally cap at limit results."""
+    items.sort(
+        key=lambda item: item.get(key, ""),
+        reverse=(order == "desc"),
+    )
+    if limit is not None:
+        return items[:limit]
+    return items
+
+
 class WealthBox:
 
     def __init__(
@@ -328,8 +378,20 @@ class WealthBox:
         self,
         resource_id: int | None = None,
         resource_type: str | None = None,
-        status: str | None = None
+        status: str | None = None,
+        assigned_to: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Get workflows, optionally filtered by assignee.
+
+        Args:
+            resource_id: Filter by linked resource ID.
+            resource_type: Resource type (default 'contact').
+            status: Filter by status: 'active', 'completed', 'scheduled'.
+            assigned_to: Client-side filter — keep only workflows with at
+                least one step assigned to this user ID. The API does not
+                support this natively. When set, workflow_steps are trimmed
+                to only the matching steps.
+        """
         default_params: dict[str, Any] = {
             'resource_type': 'contact',
             'status': 'active',
@@ -342,7 +404,20 @@ class WealthBox:
         # Merge dicts and remove keys with None values
         called_params = {k: v for k, v in called_params.items() if v is not None}
 
-        return self.api_request('workflows', params={**default_params, **called_params})
+        workflows = self.api_request('workflows', params={**default_params, **called_params})
+
+        if assigned_to is None:
+            return workflows
+
+        filtered = []
+        for wf in workflows:
+            steps = wf.get("workflow_steps", [])
+            matching = [s for s in steps if s.get("assigned_to") == assigned_to]
+            if matching:
+                wf_copy = dict(wf)
+                wf_copy["workflow_steps"] = matching
+                filtered.append(wf_copy)
+        return filtered
 
     def get_workflow(self, workflow_id: int) -> dict[str, Any]:
         """Get a single workflow by ID."""
@@ -453,13 +528,38 @@ class WealthBox:
         self,
         resource_id: int,
         resource_type: str = "contact",
-        order: str = "asc"
+        order: str = "asc",
+        since_date: str | None = None,
+        tag: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
+        """Get notes for a resource, with optional client-side filtering.
+
+        Args:
+            resource_id: The resource ID to get notes for.
+            resource_type: Resource type (default 'contact').
+            order: Sort order, 'asc' or 'desc'.
+            since_date: Only return notes created/updated after this ISO
+                date string, e.g. '2025-01-15'.
+            tag: Only return notes with this tag (case-insensitive).
+            limit: Maximum number of notes to return.
+        """
         params: dict[str, Any] = {
             'resource_id': resource_id,
             'resource_type': resource_type
         }
-        return self.api_request('notes', params=params, extract_key='status_updates')
+        notes = self.api_request('notes', params=params, extract_key='status_updates')
+
+        if since_date is not None:
+            notes = filter_by_date(notes, since_date)
+
+        if tag is not None:
+            notes = filter_by_tag(notes, tag)
+
+        if order != "asc" or limit is not None:
+            notes = sort_and_limit(notes, order=order, limit=limit)
+
+        return notes
 
     def get_note(self, note_id: int) -> dict[str, Any]:
         """Get a single note by ID."""
@@ -476,6 +576,70 @@ class WealthBox:
     def update_note(self, note_id: int, data: dict[str, Any]) -> dict[str, Any]:
         """Update a note by ID."""
         return self.api_put(f'notes/{note_id}', data)
+
+    def search_notes_by_tag(
+        self,
+        tag: str,
+        order: str = "desc",
+        limit: int = 50,
+        since_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Search all notes across the workspace by tag name.
+
+        Fetches all notes via pagination and filters by tag client-side.
+        The WealthBox API does not support server-side tag filtering for notes.
+
+        Args:
+            tag: Tag name to filter by (case-insensitive).
+            order: Sort order, 'asc' or 'desc' (default 'desc').
+            limit: Maximum number of notes to return (default 50).
+            since_date: Only return notes created/updated after this ISO
+                date string, e.g. '2025-01-15'.
+        """
+        all_notes = self.api_request(
+            "notes", params={}, extract_key="status_updates"
+        )
+
+        notes = filter_by_tag(all_notes, tag)
+
+        if since_date is not None:
+            notes = filter_by_date(notes, since_date)
+
+        return sort_and_limit(notes, order=order, limit=limit)
+
+    def get_contact_activity(
+        self,
+        contact_id: int,
+        limit: int = 20,
+        since_date: str | None = None,
+        include_comments: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Get activity history for a contact (notes, optionally with comments).
+
+        Returns notes sorted most-recent first. By default comments are NOT
+        fetched to avoid expensive N+1 API calls — set include_comments=True
+        only when you need the full conversation threads.
+
+        Args:
+            contact_id: The WealthBox contact ID.
+            limit: Maximum number of notes to return (default 20).
+            since_date: Only return notes created/updated after this ISO
+                date string.
+            include_comments: Whether to fetch comments for each note.
+        """
+        notes = self.get_notes(resource_id=contact_id)
+
+        if since_date is not None:
+            notes = filter_by_date(notes, since_date)
+
+        notes.sort(key=lambda n: n.get("created_at", ""), reverse=True)
+        notes = notes[:limit]
+
+        if include_comments:
+            for note in notes:
+                note["comments"] = self.get_comments(note["id"])
+
+        return notes
 
     def get_projects(
         self,

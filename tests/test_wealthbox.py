@@ -1,7 +1,10 @@
 import datetime
 import pytest
 import responses
-from wealthbox import WealthBox, WealthBoxAPIError, WealthBoxResponseError, WealthBoxRateLimitError
+from wealthbox import (
+    WealthBox, WealthBoxAPIError, WealthBoxResponseError, WealthBoxRateLimitError,
+    filter_by_date, filter_by_tag, sort_and_limit,
+)
 
 
 BASE_URL = "https://api.crmworkspace.com/v1/"
@@ -1312,3 +1315,360 @@ class TestHouseholdMembersEndpoints:
         result = wb.remove_household_member(100, 200)
 
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Filter utility tests
+# ---------------------------------------------------------------------------
+
+
+class TestFilterByDate:
+    def test_filters_by_created_at(self):
+        items = [
+            {"id": 1, "created_at": "2024-01-01", "updated_at": "2024-01-01"},
+            {"id": 2, "created_at": "2025-06-01", "updated_at": "2025-06-01"},
+        ]
+        result = filter_by_date(items, "2025-01-01")
+        assert [i["id"] for i in result] == [2]
+
+    def test_filters_by_updated_at(self):
+        items = [
+            {"id": 1, "created_at": "2024-01-01", "updated_at": "2025-02-01"},
+        ]
+        result = filter_by_date(items, "2025-01-01")
+        assert len(result) == 1
+
+    def test_empty_list(self):
+        assert filter_by_date([], "2025-01-01") == []
+
+    def test_custom_date_fields(self):
+        items = [{"id": 1, "due_date": "2025-06-01"}]
+        result = filter_by_date(items, "2025-01-01", date_fields=("due_date",))
+        assert len(result) == 1
+
+
+class TestFilterByTag:
+    def test_matches_tag(self):
+        items = [
+            {"id": 1, "tags": [{"name": "VIP"}]},
+            {"id": 2, "tags": [{"name": "other"}]},
+        ]
+        result = filter_by_tag(items, "VIP")
+        assert [i["id"] for i in result] == [1]
+
+    def test_case_insensitive(self):
+        items = [{"id": 1, "tags": [{"name": "Restriction"}]}]
+        assert len(filter_by_tag(items, "restriction")) == 1
+        assert len(filter_by_tag(items, "RESTRICTION")) == 1
+
+    def test_no_match(self):
+        items = [{"id": 1, "tags": [{"name": "VIP"}]}]
+        assert filter_by_tag(items, "nonexistent") == []
+
+    def test_no_tags_key(self):
+        items = [{"id": 1}]
+        assert filter_by_tag(items, "VIP") == []
+
+
+class TestSortAndLimit:
+    def test_desc_order(self):
+        items = [
+            {"id": 1, "created_at": "2024-01-01"},
+            {"id": 2, "created_at": "2025-01-01"},
+        ]
+        result = sort_and_limit(items, order="desc")
+        assert result[0]["id"] == 2
+
+    def test_asc_order(self):
+        items = [
+            {"id": 1, "created_at": "2025-01-01"},
+            {"id": 2, "created_at": "2024-01-01"},
+        ]
+        result = sort_and_limit(items, order="asc")
+        assert result[0]["id"] == 2
+
+    def test_limit(self):
+        items = [{"id": i, "created_at": f"2024-0{i}-01"} for i in range(1, 6)]
+        result = sort_and_limit(items, limit=2)
+        assert len(result) == 2
+
+    def test_no_limit_returns_all(self):
+        items = [{"id": i, "created_at": f"2024-0{i}-01"} for i in range(1, 6)]
+        result = sort_and_limit(items)
+        assert len(result) == 5
+
+    def test_custom_key(self):
+        items = [
+            {"id": 1, "updated_at": "2025-01-01"},
+            {"id": 2, "updated_at": "2024-01-01"},
+        ]
+        result = sort_and_limit(items, order="asc", key="updated_at")
+        assert result[0]["id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Extended method tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetWorkflowsAssignedTo:
+    @responses.activate
+    def test_without_assigned_to(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}workflows",
+            json={
+                "workflows": [
+                    {"id": 1, "workflow_steps": [{"assigned_to": 10}]},
+                    {"id": 2, "workflow_steps": [{"assigned_to": 20}]},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_workflows()
+        assert len(result) == 2
+
+    @responses.activate
+    def test_with_assigned_to_filters(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}workflows",
+            json={
+                "workflows": [
+                    {"id": 1, "workflow_steps": [
+                        {"id": 10, "assigned_to": 100},
+                        {"id": 11, "assigned_to": 200},
+                    ]},
+                    {"id": 2, "workflow_steps": [
+                        {"id": 20, "assigned_to": 200},
+                    ]},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_workflows(assigned_to=100)
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+        assert len(result[0]["workflow_steps"]) == 1
+        assert result[0]["workflow_steps"][0]["assigned_to"] == 100
+
+    @responses.activate
+    def test_assigned_to_no_match(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}workflows",
+            json={
+                "workflows": [
+                    {"id": 1, "workflow_steps": [{"assigned_to": 100}]},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_workflows(assigned_to=999)
+        assert result == []
+
+
+class TestGetNotesFiltered:
+    @responses.activate
+    def test_since_date_filters(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": 1, "created_at": "2024-01-01", "updated_at": "2024-01-01"},
+                    {"id": 2, "created_at": "2025-06-01", "updated_at": "2025-06-01"},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_notes(resource_id=42, since_date="2025-01-01")
+        assert len(result) == 1
+        assert result[0]["id"] == 2
+
+    @responses.activate
+    def test_tag_filter(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": 1, "tags": [{"name": "VIP"}], "created_at": "2024-01-01"},
+                    {"id": 2, "tags": [], "created_at": "2024-02-01"},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_notes(resource_id=42, tag="VIP")
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+
+    @responses.activate
+    def test_limit(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": i, "created_at": f"2024-0{i}-01"} for i in range(1, 6)
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_notes(resource_id=42, order="desc", limit=2)
+        assert len(result) == 2
+
+    @responses.activate
+    def test_no_filter_params_unchanged(self, wb):
+        """Without filter params, behavior is identical to before."""
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": 1, "created_at": "2024-01-01"},
+                    {"id": 2, "created_at": "2024-02-01"},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_notes(resource_id=42)
+        assert len(result) == 2
+
+
+class TestSearchNotesByTag:
+    @responses.activate
+    def test_finds_notes_with_tag(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": 1, "tags": [{"name": "restriction"}], "created_at": "2024-06-01"},
+                    {"id": 2, "tags": [], "created_at": "2024-07-01"},
+                    {"id": 3, "tags": [{"name": "restriction"}], "created_at": "2024-08-01"},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.search_notes_by_tag("restriction")
+        assert len(result) == 2
+        assert result[0]["id"] == 3  # desc order
+
+    @responses.activate
+    def test_with_since_date(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": 1, "tags": [{"name": "VIP"}], "created_at": "2024-01-01", "updated_at": "2024-01-01"},
+                    {"id": 2, "tags": [{"name": "VIP"}], "created_at": "2025-06-01", "updated_at": "2025-06-01"},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.search_notes_by_tag("VIP", since_date="2025-01-01")
+        assert len(result) == 1
+        assert result[0]["id"] == 2
+
+    @responses.activate
+    def test_limit(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": i, "tags": [{"name": "t"}], "created_at": f"2024-0{i}-01"}
+                    for i in range(1, 6)
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.search_notes_by_tag("t", limit=2)
+        assert len(result) == 2
+
+
+class TestGetContactActivity:
+    @responses.activate
+    def test_returns_notes_desc(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": 1, "created_at": "2024-01-01"},
+                    {"id": 2, "created_at": "2025-01-01"},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_contact_activity(contact_id=42)
+        assert result[0]["id"] == 2  # most recent first
+
+    @responses.activate
+    def test_limit(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": i, "created_at": f"2024-0{i}-01"} for i in range(1, 6)
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_contact_activity(contact_id=42, limit=2)
+        assert len(result) == 2
+
+    @responses.activate
+    def test_since_date(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [
+                    {"id": 1, "created_at": "2024-01-01", "updated_at": "2024-01-01"},
+                    {"id": 2, "created_at": "2025-06-01", "updated_at": "2025-06-01"},
+                ],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_contact_activity(contact_id=42, since_date="2025-01-01")
+        assert len(result) == 1
+        assert result[0]["id"] == 2
+
+    @responses.activate
+    def test_include_comments(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [{"id": 1, "created_at": "2024-01-01"}],
+                "meta": {"total_pages": 1}
+            },
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}comments",
+            json={
+                "comments": [{"id": 99, "body": "a comment"}],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_contact_activity(contact_id=42, include_comments=True)
+        assert "comments" in result[0]
+        assert result[0]["comments"][0]["id"] == 99
+
+    @responses.activate
+    def test_no_comments_by_default(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}notes",
+            json={
+                "status_updates": [{"id": 1, "created_at": "2024-01-01"}],
+                "meta": {"total_pages": 1}
+            },
+        )
+        result = wb.get_contact_activity(contact_id=42)
+        assert "comments" not in result[0]
