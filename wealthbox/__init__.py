@@ -159,6 +159,18 @@ class WealthBox:
         params: dict[str, Any] | None = None,
         extract_key: str | None = None
     ) -> list[dict[str, Any]] | dict[str, Any]:
+        """GET an endpoint, paginating automatically until all pages are fetched.
+
+        List/tuple values in ``params`` are auto-converted to bracket-array
+        syntax (``key`` → ``key[]``) so ``requests`` emits ``?key[]=a&key[]=b``.
+        This is necessary because the Wealthbox API takes only the LAST value
+        of repeated query params (``?k=a&k=b`` → ``b`` wins), which is what
+        ``requests`` produces by default for list values. The bracket form is
+        OR-merged by the API for filters documented as ``array[string]`` (e.g.
+        ``tags``). For scalar-string filters (``contact_type``, ``type``, ...)
+        the API rejects bracket syntax with HTTP 500 — passing a list to a
+        scalar filter is a usage error; fan out client-side instead.
+        """
         url = self.base_url + endpoint
         page = 1
         total_pages = 9999999999
@@ -166,6 +178,10 @@ class WealthBox:
             params = {}
 
         params.setdefault('per_page', '500')
+        params = {
+            (f"{k}[]" if isinstance(v, (list, tuple)) and not k.endswith('[]') else k): v
+            for k, v in params.items()
+        }
         results: list[dict[str, Any]] = []
 
         extract_key = extract_key if extract_key is not None else endpoint
@@ -309,6 +325,34 @@ class WealthBox:
     def get_contacts(
         self, filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        """Get contacts, optionally filtered. Paginates automatically.
+
+        Filter keys (https://dev.wealthbox.com/#contacts is authoritative;
+        the names below may rot):
+
+        Array filters — pass a list to OR-filter:
+            tags  — only contacts having ANY of the named tags
+
+        Scalar filters — pass a single value. Passing a list is a usage
+        error: the API will return HTTP 500 because the library serializes
+        lists as ``key[]=...`` bracket syntax, which the API only accepts
+        for documented ``array[string]`` fields:
+            id, name, email, phone, contact_type, type, active, deleted,
+            household_title, external_unique_id, order,
+            updated_since, updated_before, deleted_since
+
+        Example::
+
+            # OR-filter on tags (server-side)
+            wb.get_contacts({"type": "Person", "tags": ["VIP", "Top 10"]})
+
+            # contact_type doesn't support OR — fan out client-side
+            seen, out = set(), []
+            for ct in ("Client", "Trustee"):
+                for c in wb.get_contacts({"type": "Person", "contact_type": ct}):
+                    if c["id"] not in seen:
+                        seen.add(c["id"]); out.append(c)
+        """
         return self.api_request('contacts', params=filters)
 
     def get_contact_by_name(self, name: str) -> list[dict[str, Any]]:
@@ -346,6 +390,11 @@ class WealthBox:
         completed: bool | str | None = None,
         other_filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
+        """Get tasks, optionally filtered. Extras via ``other_filters``.
+
+        See https://dev.wealthbox.com/#tasks for filters; ``api_request``
+        for list-value semantics.
+        """
         default_params: dict[str, Any] = {
             'resource_type': 'contact',
             'completed': 'false',
@@ -440,7 +489,11 @@ class WealthBox:
         self,
         filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        """Get available workflow templates."""
+        """Get available workflow templates.
+
+        See https://dev.wealthbox.com/#workflow-templates for filters;
+        ``api_request`` for list-value semantics.
+        """
         return self.api_request('workflow_templates', params=filters)
 
     def update_workflow_step(
@@ -642,7 +695,11 @@ class WealthBox:
         self,
         filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        """Get all projects."""
+        """Get all projects.
+
+        See https://dev.wealthbox.com/#projects for filters; ``api_request``
+        for list-value semantics.
+        """
         return self.api_request('projects', params=filters)
 
     def get_project(self, project_id: int) -> dict[str, Any]:
@@ -690,21 +747,33 @@ class WealthBox:
         self,
         filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        """Get activity feed."""
+        """Get activity feed.
+
+        See https://dev.wealthbox.com/#activity for filters; ``api_request``
+        for list-value semantics.
+        """
         return self.api_request('activity', params=filters)
 
     def get_contact_roles(
         self,
         filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        """Get contact roles."""
+        """Get contact roles.
+
+        See https://dev.wealthbox.com/#contact-roles for filters;
+        ``api_request`` for list-value semantics.
+        """
         return self.api_request('contact_roles', params=filters)
 
     def get_user_groups(
         self,
         filters: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
-        """Get user groups."""
+        """Get user groups.
+
+        See https://dev.wealthbox.com/#user-groups for filters;
+        ``api_request`` for list-value semantics.
+        """
         return self.api_request('user_groups', params=filters)
 
     def add_household_member(

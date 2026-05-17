@@ -145,6 +145,34 @@ class TestApiRequest:
 
         assert exc_info.value.retry_after == 60
 
+    @pytest.mark.parametrize("key,filter_value,must_contain,must_not_contain", [
+        # Lists serialize as tags[]= because plain tags=a&tags=b is last-wins
+        # in the WB API.
+        ("tags", ["VIP", "10M"], ["tags%5B%5D=VIP", "tags%5B%5D=10M"], ["tags=VIP", "tags=10M"]),
+        # Tuples behave the same as lists.
+        ("tags", ("VIP", "10M"), ["tags%5B%5D=VIP", "tags%5B%5D=10M"], ["tags=VIP", "tags=10M"]),
+        # Scalars pass through unchanged.
+        ("tags", "VIP", ["tags=VIP"], ["tags%5B%5D="]),
+        # Pre-bracketed key must not double-bracket.
+        ("tags[]", ["VIP", "10M"], ["tags%5B%5D=VIP"], ["tags%5B%5D%5B%5D"]),
+    ])
+    @responses.activate
+    def test_list_filter_serialization(self, wb, key, filter_value, must_contain, must_not_contain):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        wb.api_request("contacts", params={key: filter_value})
+
+        sent_url = responses.calls[0].request.url
+        for fragment in must_contain:
+            assert fragment in sent_url, f"missing {fragment!r} in {sent_url!r}"
+        for fragment in must_not_contain:
+            assert fragment not in sent_url, f"unexpected {fragment!r} in {sent_url!r}"
+
 
 class TestApiPut:
     @responses.activate
