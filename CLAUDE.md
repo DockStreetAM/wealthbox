@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.8.0
+**Current version:** 0.13.0
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands
@@ -30,7 +30,7 @@ Publishing to PyPI is automated via GitHub Actions. To publish:
 1. Update version in `pyproject.toml`
 2. Run `poetry lock` to update lock file
 3. Commit changes
-4. Create a git tag matching `v*.*.*` (e.g., `v0.8.0`)
+4. Create a git tag matching `v*.*.*` (e.g., `v0.13.0`)
 5. Push the tag to trigger the workflow
 
 ## Architecture
