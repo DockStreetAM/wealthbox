@@ -127,7 +127,8 @@ def create_contact(
         if birth_date:
             data["birth_date"] = birth_date
         if tag:
-            data["tags"] = [{"name": t} for t in tag]
+            # Write bodies want tag-name strings; [{name}] objects fail with 400
+            data["tags"] = list(tag)
 
     result = client.create_contact(data)
     handle_output(ctx, result, **kwargs)

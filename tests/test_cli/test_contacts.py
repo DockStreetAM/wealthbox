@@ -157,6 +157,31 @@ class TestContactsCreate:
         assert parsed["id"] == 999
 
     @responses.activate
+    def test_create_contact_tags_sent_as_strings(self, runner, mock_token):
+        # Write bodies want tags as ["a", "b"] per dev.wealthbox.com;
+        # the [{"name": t}] response shape fails with 400
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}contacts",
+            json={"id": 1001},
+            status=201,
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "contacts", "create",
+                "--first-name", "Test",
+                "--last-name", "User",
+                "--tag", "Clients",
+                "--tag", "VIP",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0
+        body = json.loads(responses.calls[0].request.body)
+        assert body["tags"] == ["Clients", "VIP"]
+
+    @responses.activate
     def test_create_with_email_and_phone(self, runner, mock_token):
         responses.add(
             responses.POST,

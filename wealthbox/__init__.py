@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from json import JSONDecodeError
-from typing import Any
+from typing import Any, Iterable
 import time
 import requests
 from requests.adapters import HTTPAdapter
@@ -75,6 +75,18 @@ def filter_by_tag(
     ]
 
 
+def normalize_tags(tags: Iterable[str | dict[str, Any]]) -> list[str]:
+    """Normalize tags to the request shape the API accepts on writes.
+
+    WealthBox write bodies want tags as an array of name strings
+    (``["a", "b"]``), but read responses return them as objects
+    (``[{"id": 1, "name": "a"}]``). Sending the object shape in a write
+    body fails with HTTP 400. Accept either shape and emit the request
+    shape, so records read from the API can be written back unchanged.
+    """
+    return [t["name"] if isinstance(t, dict) else t for t in tags]
+
+
 def sort_and_limit(
     items: list[dict[str, Any]],
     order: str = "desc",
@@ -140,6 +152,37 @@ class WealthBox:
                 retry_after=retry_seconds
             )
 
+    def _raise_for_status(
+        self,
+        res: requests.Response,
+        method: str,
+        endpoint: str,
+    ) -> None:
+        """Raise WealthBoxAPIError with status and response body on 4xx/5xx.
+
+        The body is included in the message itself so consumers that only
+        see ``str(exc)`` (agents, CLIs, logs) get the API's actual
+        validation message, not just the status code.
+        """
+        if res.status_code < 400:
+            return
+        body = res.text[:500] if res.text else ""
+        try:
+            response = res.json()
+        except JSONDecodeError:
+            response = None
+        raise WealthBoxAPIError(
+            f"WealthBox {method} /{endpoint} failed ({res.status_code}): {body}",
+            response=response,
+        )
+
+    @staticmethod
+    def _normalize_write_data(data: dict[str, Any]) -> dict[str, Any]:
+        """Normalize known asymmetric fields in a write body (currently tags)."""
+        if "tags" in data and data["tags"] is not None:
+            data = {**data, "tags": normalize_tags(data["tags"])}
+        return data
+
     def raw_request(self, url_completion: str) -> requests.Response:
         url = self.base_url + url_completion
         for attempt in range(self._rate_limit_retries + 1):
@@ -197,6 +240,7 @@ class WealthBox:
                     time.sleep(wait_time)
                 else:
                     self._check_rate_limit(res)
+            self._raise_for_status(res, 'GET', endpoint)
             try:
                 res_json = res.json()
                 if 'meta' not in res_json:
@@ -223,6 +267,7 @@ class WealthBox:
 
     def api_put(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
         url = self.base_url + endpoint
+        data = self._normalize_write_data(data)
         for attempt in range(self._rate_limit_retries + 1):
             res = self._session.put(url, json=data)
             wait_time = self._handle_rate_limit(res)
@@ -232,6 +277,7 @@ class WealthBox:
                 time.sleep(wait_time)
             else:
                 self._check_rate_limit(res)
+        self._raise_for_status(res, 'PUT', endpoint)
         try:
             res_json = res.json()
         except JSONDecodeError as e:
@@ -239,15 +285,11 @@ class WealthBox:
                 f"Failed to decode JSON response: {e}",
                 response_text=res.text
             )
-        if res.status_code >= 400:
-            raise WealthBoxAPIError(
-                f"Request failed with status {res.status_code}",
-                response=res_json
-            )
         return res_json
 
     def api_post(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
         url = self.base_url + endpoint
+        data = self._normalize_write_data(data)
         for attempt in range(self._rate_limit_retries + 1):
             res = self._session.post(url, json=data)
             wait_time = self._handle_rate_limit(res)
@@ -257,17 +299,13 @@ class WealthBox:
                 time.sleep(wait_time)
             else:
                 self._check_rate_limit(res)
+        self._raise_for_status(res, 'POST', endpoint)
         try:
             res_json = res.json()
         except JSONDecodeError as e:
             raise WealthBoxResponseError(
                 f"Failed to decode JSON response: {e}",
                 response_text=res.text
-            )
-        if res.status_code >= 400:
-            raise WealthBoxAPIError(
-                f"Request failed with status {res.status_code}",
-                response=res_json
             )
         return res_json
 
@@ -283,20 +321,12 @@ class WealthBox:
                 time.sleep(wait_time)
             else:
                 self._check_rate_limit(res)
-        if res.status_code == 204:
+        if res.status_code in (200, 204):
             return True
-        if res.status_code == 200:
-            return True
-        try:
-            res_json = res.json()
-            raise WealthBoxAPIError(
-                f"Delete failed with status {res.status_code}",
-                response=res_json
-            )
-        except JSONDecodeError:
-            raise WealthBoxAPIError(
-                f"Delete failed with status {res.status_code}"
-            )
+        self._raise_for_status(res, 'DELETE', endpoint)
+        raise WealthBoxAPIError(
+            f"WealthBox DELETE /{endpoint} returned unexpected status {res.status_code}"
+        )
 
     def api_get_single(
         self,
@@ -313,6 +343,7 @@ class WealthBox:
                 time.sleep(wait_time)
             else:
                 self._check_rate_limit(res)
+        self._raise_for_status(res, 'GET', endpoint)
         try:
             res_json = res.json()
         except JSONDecodeError as e:
@@ -367,7 +398,10 @@ class WealthBox:
 
         Args:
             data: Contact data including fields like first_name, last_name,
-                  email_addresses, phone_numbers, etc.
+                  email_addresses, phone_numbers, etc. ``tags`` must be an
+                  array of tag-name strings on write (responses return
+                  ``[{id, name}]`` objects; either shape is accepted here
+                  and normalized via :func:`normalize_tags`).
 
         Returns:
             The created contact data.
@@ -623,7 +657,10 @@ class WealthBox:
         """Create a new note.
 
         Args:
-            data: Note data including content, linked_to, etc.
+            data: Note data including content, linked_to, etc. ``tags``
+                  must be an array of tag-name strings on write (responses
+                  return ``[{id, name}]`` objects; either shape is accepted
+                  here and normalized via :func:`normalize_tags`).
         """
         return self.api_post('notes', data)
 

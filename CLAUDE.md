@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.13.0
+**Current version:** 0.14.0
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands
@@ -35,7 +35,9 @@ Publishing to PyPI is automated via GitHub Actions. To publish:
 
 ## Architecture
 
-The library is a single module (`wealthbox/__init__.py`) with one main class and custom exceptions.
+The core library is a single module (`wealthbox/__init__.py`) with one main class and custom exceptions. A Click-based CLI lives in `wealthbox/cli/` (optional `click` dependency), with tests in `tests/test_cli/`.
+
+All request paths raise `WealthBoxAPIError` on 4xx/5xx with the status code, method, endpoint, and response body (truncated to 500 chars) in the exception message — the body is where the API names the offending field, so never swallow it.
 
 ### Exception Classes
 - `WealthBoxError` - Base exception
@@ -81,3 +83,5 @@ Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (defaul
 ## API Notes
 
 API responses use the endpoint name as the key for result arrays (e.g., `/contacts` returns `{"contacts": [...], "meta": {...}}`). Exception: `/notes` returns `{"status_updates": [...]}`.
+
+**Tag shape asymmetry:** write bodies want `tags` as an array of name strings (`["Clients"]`); read responses return objects (`[{"id": 1, "name": "Clients"}]`). Sending the object shape on a write fails with HTTP 400. `api_post`/`api_put` normalize `tags` via `normalize_tags()` automatically, so records read from the API can be written back as-is.

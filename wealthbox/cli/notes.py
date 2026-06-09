@@ -67,7 +67,8 @@ def create_note(
     if visible_to:
         data["visible_to"] = visible_to
     if tag:
-        data["tags"] = [{"name": t} for t in tag]
+        # Write bodies want tag-name strings; [{name}] objects fail with 400
+        data["tags"] = list(tag)
 
     result = client.create_note(data)
     handle_output(ctx, result, **kwargs)

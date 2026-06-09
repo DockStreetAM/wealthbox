@@ -74,6 +74,31 @@ class TestNotesCreate:
         assert body["content"] == "New note"
         assert body["linked_to"] == [{"id": 12345, "type": "Contact"}]
 
+    @responses.activate
+    def test_create_note_tags_sent_as_strings(self, runner, mock_token):
+        # Write bodies want tags as ["a", "b"] per dev.wealthbox.com;
+        # the [{"name": t}] response shape fails with 400
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}notes",
+            json={"id": 11, "content": "Call note"},
+            status=201,
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "notes", "create",
+                "--content", "Call note",
+                "--link-contact", "12345",
+                "--tag", "phone",
+                "--tag", "outbound",
+                "--json",
+            ],
+        )
+        assert result.exit_code == 0
+        body = json.loads(responses.calls[0].request.body)
+        assert body["tags"] == ["phone", "outbound"]
+
 
 class TestNotesUpdate:
     @responses.activate

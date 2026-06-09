@@ -3,7 +3,7 @@ import pytest
 import responses
 from wealthbox import (
     WealthBox, WealthBoxAPIError, WealthBoxResponseError, WealthBoxRateLimitError,
-    filter_by_date, filter_by_tag, sort_and_limit,
+    filter_by_date, filter_by_tag, normalize_tags, sort_and_limit,
 )
 
 
@@ -227,10 +227,12 @@ class TestApiPost:
             status=500
         )
 
-        with pytest.raises(WealthBoxResponseError) as exc_info:
+        with pytest.raises(WealthBoxAPIError) as exc_info:
             wb.api_post("tasks", {"name": "New Task"})
 
-        assert "Failed to decode JSON" in str(exc_info.value)
+        # Status code and raw body both surface in the message
+        assert "500" in str(exc_info.value)
+        assert "server error" in str(exc_info.value)
 
 
 class TestGetTasks:
@@ -749,7 +751,9 @@ class TestApiDelete:
         with pytest.raises(WealthBoxAPIError) as exc_info:
             wb.api_delete("contacts/123")
 
-        assert "Delete failed" in str(exc_info.value)
+        assert "DELETE /contacts/123" in str(exc_info.value)
+        assert "404" in str(exc_info.value)
+        assert "Not found" in str(exc_info.value)
 
     @responses.activate
     def test_delete_rate_limit(self, wb):
@@ -1290,8 +1294,10 @@ class TestHouseholdMembersEndpoints:
             content_type="text/plain"
         )
 
-        with pytest.raises(WealthBoxResponseError):
+        with pytest.raises(WealthBoxAPIError) as exc_info:
             wb.add_household_member(100, 200)
+        assert "500" in str(exc_info.value)
+        assert "Internal Server Error" in str(exc_info.value)
 
     @responses.activate
     def test_remove_household_member_not_found(self, wb):
@@ -1700,3 +1706,184 @@ class TestGetContactActivity:
         )
         result = wb.get_contact_activity(contact_id=42)
         assert "comments" not in result[0]
+
+
+class TestErrorSurfacing:
+    """Non-2xx responses must surface status, endpoint, and body in str(exc).
+
+    Per the hardening PRD: a failed call should be self-diagnosing on the
+    first failure — the WealthBox validation body (which names the offending
+    field) belongs in the exception message, not only on .response.
+    """
+
+    @responses.activate
+    def test_post_400_message_includes_body(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}notes",
+            json={"tags": ["is invalid"]},
+            status=400,
+        )
+
+        with pytest.raises(WealthBoxAPIError) as exc_info:
+            wb.api_post("notes", {"content": "hi"})
+
+        msg = str(exc_info.value)
+        assert "POST /notes" in msg
+        assert "400" in msg
+        assert "is invalid" in msg
+        assert exc_info.value.response == {"tags": ["is invalid"]}
+
+    @responses.activate
+    def test_put_422_message_includes_body(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}contacts/1",
+            json={"email_addresses": ["kind must be lowercase"]},
+            status=422,
+        )
+
+        with pytest.raises(WealthBoxAPIError) as exc_info:
+            wb.api_put("contacts/1", {"first_name": "A"})
+
+        msg = str(exc_info.value)
+        assert "PUT /contacts/1" in msg
+        assert "422" in msg
+        assert "kind must be lowercase" in msg
+
+    @responses.activate
+    def test_get_single_404_raises_instead_of_returning_error_json(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts/999",
+            json={"error": "Record not found"},
+            status=404,
+        )
+
+        with pytest.raises(WealthBoxAPIError) as exc_info:
+            wb.api_get_single("contacts/999")
+
+        msg = str(exc_info.value)
+        assert "GET /contacts/999" in msg
+        assert "404" in msg
+        assert "Record not found" in msg
+
+    @responses.activate
+    def test_api_request_400_raises_with_body(self, wb):
+        # Previously a 4xx here fell through to a misleading
+        # "Expected key 'contacts' not found in response"
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"error": "bad filter"},
+            status=400,
+        )
+
+        with pytest.raises(WealthBoxAPIError) as exc_info:
+            wb.api_request("contacts")
+
+        msg = str(exc_info.value)
+        assert "GET /contacts" in msg
+        assert "400" in msg
+        assert "bad filter" in msg
+
+    @responses.activate
+    def test_error_body_truncated(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}notes",
+            body="x" * 10000,
+            status=400,
+            content_type="text/plain",
+        )
+
+        with pytest.raises(WealthBoxAPIError) as exc_info:
+            wb.api_post("notes", {})
+
+        assert len(str(exc_info.value)) < 600
+
+
+class TestNormalizeTags:
+    """Write bodies want tags as ["a", "b"]; responses return [{id, name}].
+
+    Shape confirmed at https://dev.wealthbox.com/ — create-note and
+    create-contact request examples use "tags": ["Clients"], while the
+    response schema documents tags as Array (Tag) objects.
+    """
+
+    def test_strings_pass_through(self):
+        assert normalize_tags(["phone", "outbound"]) == ["phone", "outbound"]
+
+    def test_response_shape_converted(self):
+        assert normalize_tags([{"id": 1, "name": "phone"}]) == ["phone"]
+
+    def test_mixed_shapes(self):
+        assert normalize_tags(["a", {"id": 2, "name": "b"}]) == ["a", "b"]
+
+    def test_empty(self):
+        assert normalize_tags([]) == []
+
+    @responses.activate
+    def test_create_note_normalizes_object_tags_on_wire(self, wb):
+        import json as json_mod
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}notes",
+            json={"id": 1, "content": "hi"},
+            status=201,
+        )
+
+        wb.create_note({
+            "content": "hi",
+            "linked_to": [{"id": 5, "type": "Contact"}],
+            "tags": [{"id": 9, "name": "phone"}, "outbound"],
+        })
+
+        body = json_mod.loads(responses.calls[0].request.body)
+        assert body["tags"] == ["phone", "outbound"]
+
+    @responses.activate
+    def test_create_contact_string_tags_unchanged_on_wire(self, wb):
+        import json as json_mod
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}contacts",
+            json={"id": 1},
+            status=201,
+        )
+
+        wb.create_contact({"first_name": "A", "tags": ["Clients"]})
+
+        body = json_mod.loads(responses.calls[0].request.body)
+        assert body["tags"] == ["Clients"]
+
+    @responses.activate
+    def test_update_contact_normalizes_round_tripped_record(self, wb):
+        import json as json_mod
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}contacts/7",
+            json={"id": 7},
+            status=200,
+        )
+
+        # A record read from the API carries object-shaped tags; writing it
+        # back must not 400
+        wb.update_contact(7, {"first_name": "B", "tags": [{"id": 1, "name": "VIP"}]})
+
+        body = json_mod.loads(responses.calls[0].request.body)
+        assert body["tags"] == ["VIP"]
+
+    @responses.activate
+    def test_caller_dict_not_mutated(self, wb):
+        responses.add(
+            responses.POST,
+            f"{BASE_URL}notes",
+            json={"id": 1},
+            status=201,
+        )
+
+        data = {"content": "hi", "tags": [{"id": 9, "name": "phone"}]}
+        wb.create_note(data)
+
+        assert data["tags"] == [{"id": 9, "name": "phone"}]
