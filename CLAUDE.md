@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.15.0
+**Current version:** 0.15.1
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands

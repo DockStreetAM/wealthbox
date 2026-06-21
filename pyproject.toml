@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "wealthbox"
-version = "0.15.0"
+version = "0.15.1"
 description = "Python wrapper for the Wealthbox CRM API, with an optional CLI"
 authors = ["spencerogden-dsam <67068943+spencerogden-dsam@users.noreply.github.com>"]
 
