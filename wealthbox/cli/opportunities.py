@@ -19,7 +19,7 @@ def opportunities() -> None:
 @click.option("--contact", "resource_id", type=int, default=None, help="Filter by contact ID")
 @click.option("--order", type=click.Choice(["asc", "desc"]), default="asc", help="Sort order")
 @click.option("--include-closed/--no-include-closed", default=True, help="Include closed opportunities")
-@click.option("--limit", type=int, default=None, help="Max records per page")
+@click.option("--limit", type=int, default=None, help="Max records to return")
 @output_options
 @pass_client(write=False)
 def list_opportunities(
@@ -37,6 +37,8 @@ def list_opportunities(
         order=order,
         include_closed=include_closed,
     )
+    if limit:
+        data = data[:limit]
     handle_output(ctx, data, **kwargs)
 
 

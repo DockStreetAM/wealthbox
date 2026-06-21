@@ -39,6 +39,26 @@ class TestContactsList:
         assert parsed[0]["name"] == "John Smith"
 
     @responses.activate
+    def test_list_contacts_limit_truncates(self, runner, mock_token):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [
+                    {"id": 1, "name": "John Smith", "type": "Person"},
+                    {"id": 2, "name": "Jane Doe", "type": "Person"},
+                    {"id": 3, "name": "Bob Jones", "type": "Person"},
+                ],
+                "meta": {"total_pages": 1},
+            },
+            status=200,
+        )
+        result = runner.invoke(cli, ["contacts", "list", "--limit", "2", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert len(parsed) == 2
+
+    @responses.activate
     def test_list_contacts_count(self, runner, mock_token):
         responses.add(
             responses.GET,

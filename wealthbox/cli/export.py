@@ -173,14 +173,17 @@ def find_dirty_contacts(
         if isinstance(hh, dict) and hh.get("id"):
             dirty.add(hh["id"])
 
-    # 2. Tasks created since last export
+    # 2. Tasks created or updated since last export (completion toggles and
+    # edits bump updated_at but not created_at)
     for task in cache.get_all_tasks(client):
-        if _is_after(task.get("created_at"), last_export):
+        changed_at = task.get("updated_at") or task.get("created_at")
+        if _is_after(changed_at, last_export):
             dirty.update(_collect_linked_ids(task))
 
-    # 3. Opportunities created since last export
+    # 3. Opportunities created or updated since last export
     for opp in cache.get_all_opportunities(client):
-        if _is_after(opp.get("created_at"), last_export):
+        changed_at = opp.get("updated_at") or opp.get("created_at")
+        if _is_after(changed_at, last_export):
             dirty.update(_collect_linked_ids(opp))
 
     # 4. Comments on recent tasks (within lookback window)
@@ -342,9 +345,9 @@ def _parse_wb_date(date_str: str | None) -> datetime | None:
         return datetime.strptime(date_str, "%Y-%m-%d %I:%M %p %z")
     except (ValueError, TypeError):
         pass
-    # ISO format
+    # ISO format ("Z" suffix only parses natively on Python >= 3.11)
     try:
-        return datetime.fromisoformat(date_str)
+        return datetime.fromisoformat(date_str.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         pass
     # Date-only
@@ -614,7 +617,7 @@ def _render_frontmatter(
     if categories:
         lines.append("categories:")
         for cat in categories:
-            lines.append(f"  - {cat}")
+            lines.append(f'  - "{_escape_yaml(cat)}"')
 
     # Tags
     tags = contact.get("tags", [])

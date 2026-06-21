@@ -80,6 +80,7 @@ def pass_client(write: bool = False) -> Callable:
                     token=token,
                     max_retries=retry,
                     backoff_factor=0.5,
+                    timeout=timeout,
                 )
                 obj["client"] = client
 

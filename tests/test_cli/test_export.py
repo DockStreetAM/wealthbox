@@ -207,8 +207,8 @@ class TestRenderFrontmatter:
     def test_categories(self):
         contact = {"id": 1, "name": "X", "type": "Person", "contact_type": "Client"}
         result = _render_frontmatter(contact, None, [contact])
-        assert "  - Client" in result
-        assert "  - Person" in result
+        assert '  - "Client"' in result
+        assert '  - "Person"' in result
 
 
 # ---------------------------------------------------------------------------
@@ -2435,7 +2435,8 @@ class TestIncrementalExportAll:
         result = runner.invoke(cli, ["contacts", "export-all", "-o", out_dir])
         assert result.exit_code == 0, result.output
         assert "Files updated: 1" in result.output
-        assert "test-person.md" in result.output
+        # Filename carries the contact ID so same-named contacts don't collide
+        assert "test-person-100.md" in result.output
 
     @responses.activate
     def test_full_flag_exports_everything(self, runner, mock_token, tmp_path):

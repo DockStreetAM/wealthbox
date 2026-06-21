@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.14.0
+**Current version:** 0.15.0
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands
@@ -47,7 +47,7 @@ All request paths raise `WealthBoxAPIError` on 4xx/5xx with the status code, met
 
 ### WealthBox Class
 
-Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (default 0.5). Uses `requests.Session` with automatic retry on 500/502/503/504 errors.
+Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (default 0.5), `timeout` (default 30s, passed to every request). Uses `requests.Session` with automatic retry on 500/502/503/504 errors for GET/PUT/DELETE — POST is deliberately not retried so a create that succeeded server-side can't be replayed into a duplicate. All requests funnel through `_request()`, which also sleeps/retries on 429 rate limits.
 
 **Core Methods:**
 - `api_request()` - GET with automatic pagination (handles `meta.total_pages`)
@@ -78,10 +78,12 @@ Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (defaul
 
 ## Testing
 
-73 tests in `tests/test_wealthbox.py` using `responses` library for HTTP mocking. Tests cover all endpoints and error handling paths.
+~130 tests in `tests/test_wealthbox.py` (library) plus ~220 in `tests/test_cli/` (CLI commands), using the `responses` library for HTTP mocking. Tests cover all endpoints and error handling paths.
 
 ## API Notes
 
 API responses use the endpoint name as the key for result arrays (e.g., `/contacts` returns `{"contacts": [...], "meta": {...}}`). Exception: `/notes` returns `{"status_updates": [...]}`.
 
 **Tag shape asymmetry:** write bodies want `tags` as an array of name strings (`["Clients"]`); read responses return objects (`[{"id": 1, "name": "Clients"}]`). Sending the object shape on a write fails with HTTP 400. `api_post`/`api_put` normalize `tags` via `normalize_tags()` automatically, so records read from the API can be written back as-is.
+
+**Contacts tag filter:** the read filter key is `tags` (list, serialized as `tags[]=`). A bare `tag=` param is silently ignored by the API and returns the full unfiltered contact list (verified live).

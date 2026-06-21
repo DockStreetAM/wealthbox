@@ -16,16 +16,15 @@ def projects() -> None:
 
 
 @projects.command("list")
-@click.option("--limit", type=int, default=None, help="Max records per page")
+@click.option("--limit", type=int, default=None, help="Max records to return")
 @output_options
 @pass_client(write=False)
 def list_projects(client, limit: int | None, **kwargs) -> None:
     """List projects."""
     ctx = click.get_current_context()
-    params: dict[str, Any] = {}
+    data = client.get_projects()
     if limit:
-        params["per_page"] = str(limit)
-    data = client.get_projects(filters=params)
+        data = data[:limit]
     handle_output(ctx, data, **kwargs)
 
 

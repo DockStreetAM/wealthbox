@@ -25,8 +25,6 @@ from wealthbox import __version__
 @click.option("--count", is_flag=True, help="Output record count only")
 @click.option("--oneline", is_flag=True, help="One JSON object per line")
 @click.option("--output", type=str, default=None, help="Write output to file")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output")
-@click.option("--debug", is_flag=True, help="Show full request/response for debugging")
 @click.option("--timeout", type=int, default=60, help="Request timeout in seconds")
 @click.option("--retry", type=int, default=3, help="Number of retries on failure")
 @click.option("--dry-run", is_flag=True, help="Preview write operations without executing")
@@ -43,8 +41,6 @@ def cli(
     count: bool,
     oneline: bool,
     output: str | None,
-    verbose: bool,
-    debug: bool,
     timeout: int,
     retry: int,
     dry_run: bool,
@@ -81,8 +77,6 @@ def cli(
     ctx.obj["count"] = count
     ctx.obj["oneline"] = oneline
     ctx.obj["output"] = output
-    ctx.obj["verbose"] = verbose
-    ctx.obj["debug"] = debug
     ctx.obj["timeout"] = timeout
     ctx.obj["retry"] = retry
     ctx.obj["dry_run"] = dry_run

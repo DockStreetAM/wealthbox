@@ -17,9 +17,15 @@ def auth() -> None:
 
 
 @auth.command("set-token")
-@click.argument("token")
-def set_token(token: str) -> None:
-    """Save an API token to ~/.config/wealthbox/credentials.json."""
+@click.argument("token", required=False)
+def set_token(token: str | None) -> None:
+    """Save an API token to ~/.config/wealthbox/credentials.json.
+
+    Omit the argument to be prompted for the token interactively,
+    which keeps it out of shell history.
+    """
+    if token is None:
+        token = click.prompt("API token", hide_input=True)
     path = save_token(token)
     click.echo(f"Token saved to {path}")
 

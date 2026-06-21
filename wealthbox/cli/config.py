@@ -55,11 +55,15 @@ def load_token() -> str | None:
 
 
 def save_token(token: str) -> Path:
-    """Save token to credentials file. Returns the path."""
+    """Save token to credentials file (owner read/write only). Returns the path."""
     creds_path = get_credentials_path()
     creds_path.parent.mkdir(parents=True, exist_ok=True)
-    creds_path.write_text(json.dumps({"access_token": token}))
-    creds_path.chmod(0o600)
+    # Create with 0o600 from the start — write_text-then-chmod leaves a
+    # window where the file has default umask permissions
+    fd = os.open(creds_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(json.dumps({"access_token": token}))
+    creds_path.chmod(0o600)  # tighten a pre-existing file too
     return creds_path
 
 

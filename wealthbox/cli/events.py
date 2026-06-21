@@ -17,13 +17,15 @@ def events() -> None:
 
 @events.command("list")
 @click.option("--contact", "resource_id", type=int, default=None, help="Filter by contact ID")
-@click.option("--limit", type=int, default=None, help="Max records per page")
+@click.option("--limit", type=int, default=None, help="Max records to return")
 @output_options
 @pass_client(write=False)
 def list_events(client, resource_id: int | None, limit: int | None, **kwargs) -> None:
     """List events with optional filters."""
     ctx = click.get_current_context()
     data = client.get_events(resource_id=resource_id)
+    if limit:
+        data = data[:limit]
     handle_output(ctx, data, **kwargs)
 
 
@@ -110,13 +112,13 @@ def update_event(
     """Update an event by ID."""
     ctx = click.get_current_context()
     data: dict[str, Any] = {}
-    if name:
+    if name is not None:
         data["name"] = name
     if starts_at:
         data["starts_at"] = starts_at
     if ends_at:
         data["ends_at"] = ends_at
-    if location:
+    if location is not None:
         data["location"] = location
     for fv in set_fields:
         key, _, value = fv.partition("=")

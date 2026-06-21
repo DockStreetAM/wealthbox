@@ -17,13 +17,13 @@ def notes() -> None:
 
 @notes.command("list")
 @click.option("--contact", "resource_id", type=int, required=True, help="Contact ID (required)")
-@click.option("--limit", type=int, default=None, help="Max records per page")
+@click.option("--limit", type=int, default=None, help="Max records to return")
 @output_options
 @pass_client(write=False)
 def list_notes(client, resource_id: int, limit: int | None, **kwargs) -> None:
     """List notes for a contact."""
     ctx = click.get_current_context()
-    data = client.get_notes(resource_id=resource_id)
+    data = client.get_notes(resource_id=resource_id, limit=limit)
     handle_output(ctx, data, **kwargs)
 
 
@@ -90,7 +90,7 @@ def update_note(
     """Update a note by ID."""
     ctx = click.get_current_context()
     data: dict[str, Any] = {}
-    if content:
+    if content is not None:
         data["content"] = content
     for fv in set_fields:
         key, _, value = fv.partition("=")

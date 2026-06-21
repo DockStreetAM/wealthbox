@@ -18,7 +18,7 @@ def workflows() -> None:
 @workflows.command("list")
 @click.option("--contact", "resource_id", type=int, default=None, help="Filter by contact ID")
 @click.option("--status", type=click.Choice(["active", "completed", "scheduled"]), default=None, help="Filter by status")
-@click.option("--limit", type=int, default=None, help="Max records per page")
+@click.option("--limit", type=int, default=None, help="Max records to return")
 @output_options
 @pass_client(write=False)
 def list_workflows(
@@ -31,6 +31,8 @@ def list_workflows(
     """List workflows with optional filters."""
     ctx = click.get_current_context()
     data = client.get_workflows(resource_id=resource_id, status=status)
+    if limit:
+        data = data[:limit]
     handle_output(ctx, data, **kwargs)
 
 

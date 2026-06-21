@@ -113,10 +113,12 @@ class WealthBox:
         backoff_factor: float = 0.5,
         rate_limit_retries: int = 5,
         rate_limit_max_wait: int = 120,
+        timeout: float | None = 30,
     ) -> None:
         self.token = token
         self.user_id: int | None = None
         self.base_url = "https://api.crmworkspace.com/v1/"
+        self.timeout = timeout
         self._rate_limit_retries = rate_limit_retries
         self._rate_limit_max_wait = rate_limit_max_wait
 
@@ -125,7 +127,9 @@ class WealthBox:
             total=max_retries,
             backoff_factor=backoff_factor,
             status_forcelist=[500, 502, 503, 504],
-            allowed_methods=["GET", "PUT", "POST", "DELETE"],
+            # POST is excluded: a create that succeeded server-side but came
+            # back as a 5xx would be replayed and create a duplicate record.
+            allowed_methods=["GET", "PUT", "DELETE"],
             raise_on_status=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
@@ -135,22 +139,36 @@ class WealthBox:
         self._session.mount("http://", adapter)
         self._session.headers.update({'ACCESS_TOKEN': self.token})
 
-    def _handle_rate_limit(self, response: requests.Response) -> int | None:
-        """Check for rate limit and return wait time, or None if not rate limited."""
-        if response.status_code == 429:
-            retry_after = response.headers.get('Retry-After')
-            return int(retry_after) if retry_after else 60  # default 60s
-        return None
+    @staticmethod
+    def _retry_after_seconds(response: requests.Response) -> int | None:
+        """Parse the Retry-After header of a 429, tolerating non-integer values."""
+        retry_after = response.headers.get('Retry-After')
+        try:
+            # Retry-After may legally be an HTTP-date; treat that as unknown
+            return int(retry_after) if retry_after else None
+        except ValueError:
+            return None
 
-    def _check_rate_limit(self, response: requests.Response) -> None:
-        """Check if response indicates rate limiting and raise if so."""
-        if response.status_code == 429:
-            retry_after = response.headers.get('Retry-After')
-            retry_seconds = int(retry_after) if retry_after else None
-            raise WealthBoxRateLimitError(
-                "Rate limit exceeded",
-                retry_after=retry_seconds
-            )
+    def _request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        """Issue a request, sleeping and retrying on 429 rate limits.
+
+        Raises WealthBoxRateLimitError once retries are exhausted or the
+        server asks for a wait longer than rate_limit_max_wait.
+        """
+        kwargs.setdefault('timeout', self.timeout)
+        for attempt in range(self._rate_limit_retries + 1):
+            res = self._session.request(method, url, **kwargs)
+            if res.status_code != 429:
+                return res
+            wait_time = self._retry_after_seconds(res) or 60  # default 60s
+            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
+                time.sleep(wait_time)
+            else:
+                raise WealthBoxRateLimitError(
+                    "Rate limit exceeded",
+                    retry_after=self._retry_after_seconds(res)
+                )
+        return res  # unreachable but satisfies type checker
 
     def _raise_for_status(
         self,
@@ -176,6 +194,22 @@ class WealthBox:
             response=response,
         )
 
+    def _json_or_raise(
+        self,
+        res: requests.Response,
+        method: str,
+        endpoint: str,
+    ) -> Any:
+        """Raise on HTTP error, then decode and return the JSON body."""
+        self._raise_for_status(res, method, endpoint)
+        try:
+            return res.json()
+        except JSONDecodeError as e:
+            raise WealthBoxResponseError(
+                f"Failed to decode JSON response: {e}",
+                response_text=res.text
+            )
+
     @staticmethod
     def _normalize_write_data(data: dict[str, Any]) -> dict[str, Any]:
         """Normalize known asymmetric fields in a write body (currently tags)."""
@@ -184,18 +218,9 @@ class WealthBox:
         return data
 
     def raw_request(self, url_completion: str) -> requests.Response:
-        url = self.base_url + url_completion
-        for attempt in range(self._rate_limit_retries + 1):
-            res = self._session.get(url)
-            wait_time = self._handle_rate_limit(res)
-            if wait_time is None:
-                return res
-            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
-                time.sleep(wait_time)
-            else:
-                self._check_rate_limit(res)
-        return res  # unreachable but satisfies type checker
-    
+        return self._request('GET', self.base_url + url_completion)
+
+
     def api_request(
         self,
         endpoint: str,
@@ -216,10 +241,8 @@ class WealthBox:
         """
         url = self.base_url + endpoint
         page = 1
-        total_pages = 9999999999
-        if params is None:
-            params = {}
-
+        total_pages: int | None = None
+        params = dict(params) if params else {}
         params.setdefault('per_page', '500')
         params = {
             (f"{k}[]" if isinstance(v, (list, tuple)) and not k.endswith('[]') else k): v
@@ -229,98 +252,40 @@ class WealthBox:
 
         extract_key = extract_key if extract_key is not None else endpoint
 
-        while page <= total_pages:
+        while total_pages is None or page <= total_pages:
             params['page'] = page
-            for attempt in range(self._rate_limit_retries + 1):
-                res = self._session.get(url, params=params)
-                wait_time = self._handle_rate_limit(res)
-                if wait_time is None:
-                    break
-                if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
-                    time.sleep(wait_time)
-                else:
-                    self._check_rate_limit(res)
-            self._raise_for_status(res, 'GET', endpoint)
-            try:
-                res_json = res.json()
-                if 'meta' not in res_json:
-                    total_pages = 1
-                    results = res_json
-                else:
-                    total_pages = res_json['meta']['total_pages']
-                    # The WB API usually (always?) returns a list of results under a key with the same name as the endpoint
-                    key = extract_key.split('/')[-1]
-                    if key not in res_json:
-                        raise WealthBoxAPIError(
-                            f"Expected key '{key}' not found in response",
-                            response=res_json
-                        )
-                    results.extend(res_json[key])
-                page += 1
-            except JSONDecodeError as e:
-                raise WealthBoxResponseError(
-                    f"Failed to decode JSON response: {e}",
-                    response_text=res.text
-                )
+            res = self._request('GET', url, params=params)
+            res_json = self._json_or_raise(res, 'GET', endpoint)
+            if 'meta' not in res_json:
+                total_pages = 1
+                results = res_json
+            else:
+                total_pages = res_json['meta']['total_pages']
+                # The WB API usually (always?) returns a list of results under a key with the same name as the endpoint
+                key = extract_key.split('/')[-1]
+                if key not in res_json:
+                    raise WealthBoxAPIError(
+                        f"Expected key '{key}' not found in response",
+                        response=res_json
+                    )
+                results.extend(res_json[key])
+            page += 1
 
         return results
 
     def api_put(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
-        url = self.base_url + endpoint
         data = self._normalize_write_data(data)
-        for attempt in range(self._rate_limit_retries + 1):
-            res = self._session.put(url, json=data)
-            wait_time = self._handle_rate_limit(res)
-            if wait_time is None:
-                break
-            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
-                time.sleep(wait_time)
-            else:
-                self._check_rate_limit(res)
-        self._raise_for_status(res, 'PUT', endpoint)
-        try:
-            res_json = res.json()
-        except JSONDecodeError as e:
-            raise WealthBoxResponseError(
-                f"Failed to decode JSON response: {e}",
-                response_text=res.text
-            )
-        return res_json
+        res = self._request('PUT', self.base_url + endpoint, json=data)
+        return self._json_or_raise(res, 'PUT', endpoint)
 
     def api_post(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
-        url = self.base_url + endpoint
         data = self._normalize_write_data(data)
-        for attempt in range(self._rate_limit_retries + 1):
-            res = self._session.post(url, json=data)
-            wait_time = self._handle_rate_limit(res)
-            if wait_time is None:
-                break
-            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
-                time.sleep(wait_time)
-            else:
-                self._check_rate_limit(res)
-        self._raise_for_status(res, 'POST', endpoint)
-        try:
-            res_json = res.json()
-        except JSONDecodeError as e:
-            raise WealthBoxResponseError(
-                f"Failed to decode JSON response: {e}",
-                response_text=res.text
-            )
-        return res_json
+        res = self._request('POST', self.base_url + endpoint, json=data)
+        return self._json_or_raise(res, 'POST', endpoint)
 
     def api_delete(self, endpoint: str) -> bool:
         """Delete a resource. Returns True if successful (204 status)."""
-        url = self.base_url + endpoint
-        for attempt in range(self._rate_limit_retries + 1):
-            res = self._session.delete(url)
-            wait_time = self._handle_rate_limit(res)
-            if wait_time is None:
-                break
-            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
-                time.sleep(wait_time)
-            else:
-                self._check_rate_limit(res)
+        res = self._request('DELETE', self.base_url + endpoint)
         if res.status_code in (200, 204):
             return True
         self._raise_for_status(res, 'DELETE', endpoint)
@@ -333,25 +298,8 @@ class WealthBox:
         endpoint: str
     ) -> dict[str, Any]:
         """Get a single resource by ID."""
-        url = self.base_url + endpoint
-        for attempt in range(self._rate_limit_retries + 1):
-            res = self._session.get(url)
-            wait_time = self._handle_rate_limit(res)
-            if wait_time is None:
-                break
-            if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
-                time.sleep(wait_time)
-            else:
-                self._check_rate_limit(res)
-        self._raise_for_status(res, 'GET', endpoint)
-        try:
-            res_json = res.json()
-        except JSONDecodeError as e:
-            raise WealthBoxResponseError(
-                f"Failed to decode JSON response: {e}",
-                response_text=res.text
-            )
-        return res_json
+        res = self._request('GET', self.base_url + endpoint)
+        return self._json_or_raise(res, 'GET', endpoint)
 
     def get_contacts(
         self, filters: dict[str, Any] | None = None
@@ -544,7 +492,7 @@ class WealthBox:
         resource_type: str = 'contact'
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
-        if resource_id:
+        if resource_id is not None:
             params['resource_id'] = resource_id
         if resource_type:
             params['resource_type'] = resource_type
@@ -578,14 +526,15 @@ class WealthBox:
         include_closed: bool = True
     ) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
-        if resource_id:
+        if resource_id is not None:
             params['resource_id'] = resource_id
         if resource_type:
             params['resource_type'] = resource_type
         if order:
             params['order'] = order
         if include_closed:
-            params['include_closed'] = include_closed
+            # Lowercase: requests would serialize a Python bool as "True"
+            params['include_closed'] = str(include_closed).lower()
         return self.api_request('opportunities', params=params)
 
     def get_opportunity(self, opportunity_id: int) -> dict[str, Any]:
@@ -850,7 +799,7 @@ class WealthBox:
     def get_my_tasks(self) -> list[dict[str, Any]]:
         if self.user_id is None:
             self.get_my_user_id()
-        return self.get_tasks({'assigned_to': self.user_id})
+        return self.get_tasks(assigned_to=self.user_id)
 
     def get_custom_fields(
         self, document_type: str | None = None
@@ -936,11 +885,12 @@ class WealthBox:
         if not isinstance(wb_data, (dict, list)):
             return wb_data
         if isinstance(wb_data, dict):
-            if 'creator' in wb_data:
-                wb_data['creator'] = user_map.get(wb_data['creator'], wb_data['creator'])
-            if 'assigned_to' in wb_data:
-                wb_data['assigned_to'] = user_map.get(wb_data['assigned_to'], wb_data['assigned_to'])
-            return {k: self.enhance_user_info(v, user_map) for k, v in wb_data.items()}
+            # Build a new dict — the input is never mutated
+            result = {k: self.enhance_user_info(v, user_map) for k, v in wb_data.items()}
+            for field in ('creator', 'assigned_to'):
+                if field in wb_data:
+                    result[field] = user_map.get(wb_data[field], wb_data[field])
+            return result
         if isinstance(wb_data, list):
             return [self.enhance_user_info(d, user_map) for d in wb_data]
 
@@ -1007,16 +957,28 @@ class WealthBox:
             user_team_map[user['name']] = user['id']
             user_team_map[user['name'].split(' ')[0]] = user['id']
             user_team_map[user['name'].split(' ')[-1]] = user['id']
-        for team in self.get_teams():
+        teams = self.get_teams()
+        team_names = {team['name'] for team in teams}
+        for team in teams:
             user_team_map[team['name']] = team['id']
 
         assigned_to_id = user_team_map.get(assigned_to) if assigned_to else None
-        is_team = assigned_to in [team['name'] for team in self.get_teams()] if assigned_to else False
+        if assigned_to and assigned_to_id is None:
+            # Without this, an unknown name would silently assign the task
+            # to the API token's owner (create_task_detailed's fallback)
+            raise ValueError(f"No user or team named {assigned_to!r} found")
+        is_team = assigned_to in team_names if assigned_to else False
 
         category_id: int | None
         if isinstance(category, str):
             task_categories = self.get_categories('task_categories')
-            category_id = [c['id'] for c in task_categories if c['name'] == category][0]
+            matches = [c['id'] for c in task_categories if c['name'] == category]
+            if not matches:
+                available = ", ".join(sorted(c['name'] for c in task_categories))
+                raise ValueError(
+                    f"No task category named {category!r}; available: {available}"
+                )
+            category_id = matches[0]
         else:
             category_id = category
 

@@ -21,7 +21,7 @@ def contacts() -> None:
 @click.option("--tag", type=str, default=None, help="Filter by tag name")
 @click.option("--search", type=str, default=None, help="Full-text search query")
 @click.option("--updated-since", type=str, default=None, help="Filter by updated_since (ISO8601)")
-@click.option("--limit", type=int, default=None, help="Max records per page")
+@click.option("--limit", type=int, default=None, help="Max records to return")
 @output_options
 @pass_client(write=False)
 def list_contacts(
@@ -42,15 +42,17 @@ def list_contacts(
     if contact_type:
         params["contact_type"] = contact_type
     if tag:
-        params["tag"] = tag
+        # The API ignores a bare "tag" param (returns everything); the
+        # filter key is "tags", list-serialized to tags[]= by the library
+        params["tags"] = [tag]
     if search:
         params["name"] = search
     if updated_since:
         params["updated_since"] = updated_since
-    if limit:
-        params["per_page"] = str(limit)
 
     data = client.get_contacts(filters=params)
+    if limit:
+        data = data[:limit]
     handle_output(ctx, data, **kwargs)
 
 
@@ -170,11 +172,11 @@ def update_contact(
             data = json_mod.loads(json_data)
     else:
         data: dict[str, Any] = {}
-        if first_name:
+        if first_name is not None:
             data["first_name"] = first_name
-        if last_name:
+        if last_name is not None:
             data["last_name"] = last_name
-        if contact_type:
+        if contact_type is not None:
             data["contact_type"] = contact_type
         if email:
             data["email_addresses"] = [{"address": email, "kind": "Work"}]
@@ -348,67 +350,68 @@ def export_all_contacts(
                     return True
         return False
 
-    def do_export(contact: dict[str, Any], phase: str) -> None:
-        """Export a single contact and track its members."""
+    def _track_members(members: list[dict[str, Any]]) -> None:
+        """Track household members so we don't re-export them."""
+        for member in members:
+            member_id = member.get("id") or member.get("contact", {}).get("id")
+            if member_id:
+                exported_ids.add(member_id)
+
+    def do_export(contact: dict[str, Any], phase: str, progress: str = "") -> bool:
+        """Export a single contact and track its members.
+
+        Returns True if the contact was exported (or would be, in dry-run).
+        """
         contact_id = contact["id"]
         name = contact.get("name", f"contact-{contact_id}")
         members = contact.get("members", [])
 
         if contact_id in exported_ids:
             stats["skipped"] += 1
-            return
+            return False
 
         # Check if this contact needs re-export (incremental mode)
         if not _is_dirty(contact_id, members):
             stats["skipped_clean"] += 1
             exported_ids.add(contact_id)
-            # Still track household members so we don't re-export them
-            for member in members:
-                member_id = member.get("id") or member.get("contact", {}).get("id")
-                if member_id:
-                    exported_ids.add(member_id)
-            return
+            _track_members(members)
+            return False
 
         if dry_run:
             click.echo(f"  [{phase}] Would export: {name} (ID: {contact_id})")
             exported_ids.add(contact_id)
-            # Track household members
-            for member in members:
-                member_id = member.get("id") or member.get("contact", {}).get("id")
-                if member_id:
-                    exported_ids.add(member_id)
-            return
+            _track_members(members)
+            return True
 
         try:
             markdown = export_contact_to_markdown(
                 client, contact_id, cache=cache, workspace_id=workspace_id
             )
 
-            # Generate filename
+            # Generate filename; the ID suffix keeps same-named contacts
+            # from overwriting each other
             match = re_mod.search(r'^title:\s*"(.+?)"', markdown, re_mod.MULTILINE)
             title = match.group(1) if match else name
-            filename = f"{_slugify(title)}.md"
+            filename = f"{_slugify(title)}-{contact_id}.md"
             filepath = os.path.join(output_dir, filename)
 
             with open(filepath, "w") as f:
                 f.write(markdown)
 
-            click.echo(f"  [{phase}] {name} -> {filename}")
+            click.echo(f"{progress}  [{phase}] {name} -> {filename}")
             exported_ids.add(contact_id)
             stats["updated"] += 1
 
             # Track in metadata
             meta.contact_files[contact_id] = filename
 
-            # Track household members so we don't re-export them
-            for member in members:
-                member_id = member.get("id") or member.get("contact", {}).get("id")
-                if member_id:
-                    exported_ids.add(member_id)
+            _track_members(members)
+            return True
 
         except Exception as e:
-            click.echo(f"  [{phase}] ERROR exporting {name}: {e}", err=True)
+            click.echo(f"{progress}  [{phase}] ERROR exporting {name}: {e}", err=True)
             stats["errors"] += 1
+            return False
 
     # Phase 1: Households
     click.echo("\n=== Phase 1: Households ===")
@@ -417,10 +420,8 @@ def export_all_contacts(
     click.echo(f"Found {len(households)} households")
 
     for i, hh in enumerate(households, 1):
-        if not dry_run:
-            click.echo(f"[{i}/{len(households)}]", nl=False)
-        do_export(hh, "HH")
-        stats["households"] += 1
+        if do_export(hh, "HH", progress=f"[{i}/{len(households)}]"):
+            stats["households"] += 1
 
     # Phase 2: Persons not in households
     click.echo("\n=== Phase 2: Individual Persons ===")
@@ -430,10 +431,8 @@ def export_all_contacts(
     click.echo(f"Found {len(persons)} persons, {len(not_in_hh)} not in households")
 
     for i, person in enumerate(not_in_hh, 1):
-        if not dry_run:
-            click.echo(f"[{i}/{len(not_in_hh)}]", nl=False)
-        do_export(person, "Person")
-        stats["persons"] += 1
+        if do_export(person, "Person", progress=f"[{i}/{len(not_in_hh)}]"):
+            stats["persons"] += 1
 
     # Phase 3: Trusts and Organizations
     click.echo("\n=== Phase 3: Trusts & Organizations ===")
@@ -443,20 +442,16 @@ def export_all_contacts(
     click.echo(f"Found {len(trusts)} trusts")
 
     for i, trust in enumerate(trusts, 1):
-        if not dry_run:
-            click.echo(f"[{i}/{len(trusts)}]", nl=False)
-        do_export(trust, "Trust")
-        stats["trusts"] += 1
+        if do_export(trust, "Trust", progress=f"[{i}/{len(trusts)}]"):
+            stats["trusts"] += 1
 
     org_params = {**params, "type": "Organization"}
     orgs = client.get_contacts(filters=org_params)
     click.echo(f"Found {len(orgs)} organizations")
 
     for i, org in enumerate(orgs, 1):
-        if not dry_run:
-            click.echo(f"[{i}/{len(orgs)}]", nl=False)
-        do_export(org, "Org")
-        stats["organizations"] += 1
+        if do_export(org, "Org", progress=f"[{i}/{len(orgs)}]"):
+            stats["organizations"] += 1
 
     # Save metadata
     if not dry_run:

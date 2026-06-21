@@ -8,6 +8,8 @@ import json
 import sys
 from typing import Any
 
+import click
+
 
 def _is_tty() -> bool:
     return hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
@@ -172,7 +174,3 @@ def _write_output(text: str, output_file: str | None) -> None:
                 f.write("\n")
     else:
         click.echo(text)
-
-
-# Import click at module level for echo
-import click  # noqa: E402

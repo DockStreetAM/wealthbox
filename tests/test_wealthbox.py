@@ -516,6 +516,52 @@ class TestCreateTask:
         assert b'"assigned_to": 10' in post_body
 
     @responses.activate
+    def test_unknown_assignee_raises(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}users",
+            json={"users": [{"id": 10, "name": "John Doe"}], "meta": {"total_pages": 1}},
+            status=200
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}teams",
+            json={"teams": [], "meta": {"total_pages": 1}},
+            status=200
+        )
+
+        # A typo'd name must raise, not silently assign to the token owner
+        with pytest.raises(ValueError, match="No user or team named 'Jon Doh'"):
+            wb.create_task("My Task", assigned_to="Jon Doh")
+
+    @responses.activate
+    def test_unknown_category_raises(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}users",
+            json={"users": [{"id": 10, "name": "John Doe"}], "meta": {"total_pages": 1}},
+            status=200
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}teams",
+            json={"teams": [], "meta": {"total_pages": 1}},
+            status=200
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}categories/task_categories",
+            json={
+                "task_categories": [{"id": 5, "name": "Follow Up"}],
+                "meta": {"total_pages": 1}
+            },
+            status=200
+        )
+
+        with pytest.raises(ValueError, match="No task category named 'Nope'"):
+            wb.create_task("My Task", category="Nope")
+
+    @responses.activate
     def test_linked_to_single_id(self, wb):
         responses.add(
             responses.GET,
@@ -712,6 +758,29 @@ class TestGetMyUserId:
 
         assert result == 42
         assert wb.user_id == 42
+
+
+class TestGetMyTasks:
+    @responses.activate
+    def test_filters_by_assigned_to(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}me",
+            json={"current_user": {"id": 42}},
+            status=200
+        )
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}tasks",
+            json={"tasks": [], "meta": {"total_pages": 1}},
+            status=200
+        )
+
+        wb.get_my_tasks()
+
+        request_params = responses.calls[1].request.params
+        assert request_params["assigned_to"] == "42"
+        assert "resource_id" not in request_params
 
 
 class TestApiDelete:
@@ -1887,3 +1956,43 @@ class TestNormalizeTags:
         wb.create_note(data)
 
         assert data["tags"] == [{"id": 9, "name": "phone"}]
+
+
+class TestTimeout:
+    def test_default_timeout_passed_to_requests(self, wb, monkeypatch):
+        captured = {}
+
+        def fake_request(method, url, **kwargs):
+            captured.update(kwargs)
+
+            class FakeResponse:
+                status_code = 200
+                text = "{}"
+
+                @staticmethod
+                def json():
+                    return {"id": 1}
+
+            return FakeResponse()
+
+        monkeypatch.setattr(wb._session, "request", fake_request)
+        wb.api_get_single("contacts/1")
+
+        assert captured["timeout"] == 30
+
+    def test_custom_timeout(self, monkeypatch):
+        wb = WealthBox(token="t", timeout=5)
+        assert wb.timeout == 5
+
+    def test_caller_params_not_mutated(self, wb):
+        import responses as _responses
+        with _responses.RequestsMock() as rsps:
+            rsps.add(
+                _responses.GET,
+                f"{BASE_URL}contacts",
+                json={"contacts": [], "meta": {"total_pages": 1}},
+                status=200,
+            )
+            params = {"type": "Person"}
+            wb.api_request("contacts", params=params)
+            assert params == {"type": "Person"}

@@ -19,7 +19,7 @@ def tasks() -> None:
 @click.option("--assigned-to", type=int, default=None, help="Filter by assignee user ID")
 @click.option("--completed/--incomplete", default=None, help="Filter by completion status")
 @click.option("--contact", "resource_id", type=int, default=None, help="Filter by linked contact ID")
-@click.option("--limit", type=int, default=None, help="Max records per page")
+@click.option("--limit", type=int, default=None, help="Max records to return")
 @output_options
 @pass_client(write=False)
 def list_tasks(
@@ -33,8 +33,6 @@ def list_tasks(
     """List tasks with optional filters."""
     ctx = click.get_current_context()
     other_filters: dict[str, Any] = {}
-    if limit:
-        other_filters["per_page"] = str(limit)
 
     completed_val: bool | str | None = None
     if completed is True:
@@ -121,13 +119,13 @@ def update_task(
     """Update a task by ID."""
     ctx = click.get_current_context()
     data: dict[str, Any] = {}
-    if name:
+    if name is not None:
         data["name"] = name
     if due_date:
         data["due_date"] = f"{due_date}T00:00:00Z"
     if completed is not None:
         data["completed"] = completed
-    if description:
+    if description is not None:
         data["description"] = description
     for fv in set_fields:
         key, _, value = fv.partition("=")
