@@ -75,7 +75,7 @@ Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (defaul
 **Custom fields (write-by-name):**
 - `build_custom_fields_payload(document_type, {name: value})` resolves field names to the API's `[{id, value}]` write shape (the API writes custom fields by **id**, not name). `update_contact(id, updates, custom_fields={name: value})` uses it. `get_custom_field_value(record, name)` reads a value by name (case-insensitive).
 
-**Known API holes (cannot be filled — UI-only or undocumented):** Related/Linked Contacts (parent/child) are not in the API; household membership is the only structured relationship data. There is no documented `DELETE /notes/{id}`, `POST /comments`, or `PUT /workflows/{id}` — notes can't be deleted, comments can't be created, and workflows can't be updated (only their steps) via the API.
+**Known API holes (cannot be filled — UI-only or absent):** Related/Linked Contacts (parent/child) are not in the API; household membership is the only structured relationship data. `DELETE /notes/{id}`, `POST /comments`, and `PUT /workflows/{id}` do not exist — notes can't be deleted, comments can't be created, and workflows can't be updated (only their steps). See the empirical probe note under API Notes below.
 
 **Helper Methods:**
 - `*_with_comments()` - Fetch resources and attach their comments
@@ -94,3 +94,5 @@ API responses use the endpoint name as the key for result arrays (e.g., `/contac
 **Tag shape asymmetry:** write bodies want `tags` as an array of name strings (`["Clients"]`); read responses return objects (`[{"id": 1, "name": "Clients"}]`). Sending the object shape on a write fails with HTTP 400. `api_post`/`api_put` normalize `tags` via `normalize_tags()` automatically, so records read from the API can be written back as-is.
 
 **Contacts tag filter:** the read filter key is `tags` (list, serialized as `tags[]=`). A bare `tag=` param is silently ignored by the API and returns the full unfiltered contact list (verified live).
+
+**Absent endpoints (empirically probed 2026-06-21, all returned bare 404 — no route):** `POST /comments` and `POST /notes/{id}/comments` (no way to create a comment/reply — `get_comments()` read is the only comments op), `DELETE /notes/{id}` (notes can't be deleted directly), global `search`, `contacts/search`, `documents`, `attachments`, `files`, `reports`, `pipelines`, `webhooks`, and nested routes (`contacts/{id}/notes`, `notes/{id}/comments`). Don't re-investigate these — they were tested live with a disposable contact+note. **Cascade-delete:** there is no `DELETE /notes/{id}`, but deleting a contact (`DELETE /contacts/{id}`) removes its linked notes — confirmed when a test note 404'd only after the parent contact was deleted.
