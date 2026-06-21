@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.15.1
+**Current version:** 0.16.0
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands
@@ -50,7 +50,8 @@ All request paths raise `WealthBoxAPIError` on 4xx/5xx with the status code, met
 Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (default 0.5), `timeout` (default 30s, passed to every request). Uses `requests.Session` with automatic retry on 500/502/503/504 errors for GET/PUT/DELETE — POST is deliberately not retried so a create that succeeded server-side can't be replayed into a duplicate. All requests funnel through `_request()`, which also sleeps/retries on 429 rate limits.
 
 **Core Methods:**
-- `api_request()` - GET with automatic pagination (handles `meta.total_pages`)
+- `api_request()` - GET with automatic pagination. Pages 2..N are fetched **concurrently** (`page_workers`, default 8) since the API caps `per_page` at 100 server-side — ~6x faster on large pulls. Accepts `max_results` to stop paginating early (only the needed pages are fetched).
+- `count()` - total record count from one `per_page=1` request (reads `meta.total_count`) without fetching the list.
 - `api_get_single()` - GET single resource by ID
 - `api_put()` / `api_post()` / `api_delete()` - Write operations
 
@@ -66,9 +67,15 @@ Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (defaul
 **Additional Endpoints:**
 - `get_workflow_templates()`, `update_workflow_step()`
 - `get_activity()`, `get_contact_roles()`, `get_user_groups()`
-- `add_household_member()`, `remove_household_member()`
+- `add_household_member()`, `remove_household_member()`, `resolve_household()`, `get_household_members()`
 - `get_users()`, `get_teams()`, `get_categories()`, `get_tags()`, `get_custom_fields()`
+- Category convenience wrappers: `get_opportunity_stages()`, `get_note_categories()`, `get_event_categories()`, `get_project_statuses()`, `get_task_categories()`, `get_contact_types()`
 - `get_comments()`
+
+**Custom fields (write-by-name):**
+- `build_custom_fields_payload(document_type, {name: value})` resolves field names to the API's `[{id, value}]` write shape (the API writes custom fields by **id**, not name). `update_contact(id, updates, custom_fields={name: value})` uses it. `get_custom_field_value(record, name)` reads a value by name (case-insensitive).
+
+**Known API holes (cannot be filled — UI-only or undocumented):** Related/Linked Contacts (parent/child) are not in the API; household membership is the only structured relationship data. There is no documented `DELETE /notes/{id}`, `POST /comments`, or `PUT /workflows/{id}` — notes can't be deleted, comments can't be created, and workflows can't be updated (only their steps) via the API.
 
 **Helper Methods:**
 - `*_with_comments()` - Fetch resources and attach their comments

@@ -29,6 +29,7 @@ class ExportCache:
     user_map: dict[int, str] | None = None
     all_tasks: list[dict[str, Any]] | None = None
     all_opportunities: list[dict[str, Any]] | None = None
+    stage_map: dict[int, str] | None = None
     _task_comments: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
 
     def get_user_map(self, client: Any) -> dict[int, str]:
@@ -36,6 +37,16 @@ class ExportCache:
         if self.user_map is None:
             self.user_map = client.make_user_map("name")
         return self.user_map
+
+    def get_stage_map(self, client: Any) -> dict[int, str]:
+        """Get opportunity stage id→name map, fetching once and caching."""
+        if self.stage_map is None:
+            self.stage_map = {
+                s["id"]: s.get("name", "")
+                for s in client.get_opportunity_stages()
+                if isinstance(s, dict) and "id" in s
+            }
+        return self.stage_map
 
     def get_all_tasks(self, client: Any) -> list[dict[str, Any]]:
         """Get all tasks (completed + incomplete), fetching once and caching."""
@@ -410,48 +421,21 @@ def _escape_yaml(s: str) -> str:
 # Household resolution
 # ---------------------------------------------------------------------------
 
+# Household resolution lives in the WealthBox client (single source of
+# truth); these thin wrappers preserve export.py's internal call sites.
+
 def _resolve_household(
     client: Any, contact: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """Resolve household membership.
-
-    Returns (member_contacts, household_info_or_None).
-    """
-    contact_type = contact.get("type", "")
-
-    if contact_type == "Household":
-        hh_id = contact.get("id")
-        hh_name = contact.get("name", "")
-        members = _fetch_household_members(client, contact)
-        if not members:
-            members = [contact]
-        return members, {"id": hh_id, "name": hh_name}
-
-    hh_ref = contact.get("household") or {}
-    hh_id = hh_ref.get("id")
-    if hh_id:
-        hh_contact = client.get_contact(hh_id)
-        hh_name = hh_contact.get("name", hh_ref.get("name", ""))
-        members = _fetch_household_members(client, hh_contact)
-        if not members:
-            members = [contact]
-        return members, {"id": hh_id, "name": hh_name}
-
-    return [contact], None
+    """Resolve household membership. Returns (member_contacts, household_info)."""
+    return client.resolve_household(contact)
 
 
 def _fetch_household_members(
     client: Any, household_contact: dict[str, Any]
 ) -> list[dict[str, Any]]:
     """Fetch individual member contacts from a household contact."""
-    members: list[dict[str, Any]] = []
-    for member_ref in household_contact.get("members", []):
-        # Handle both {"contact": {"id": N}} and {"id": N} shapes
-        inner = member_ref.get("contact", member_ref)
-        member_id = inner.get("id") if isinstance(inner, dict) else None
-        if member_id:
-            members.append(client.get_contact(member_id))
-    return members
+    return client.get_household_members(household_contact)
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +526,23 @@ def _fetch_all_activity(
         linked_ids = {link["id"] for link in opp.get("linked_to", []) if isinstance(link, dict)}
         if linked_ids & member_ids and opp["id"] not in seen_opps:
             seen_opps.add(opp["id"])
-            all_opps.append(opp)
+            all_opps.append(dict(opp))  # copy: opp may be cached
+
+    # Resolve integer stage IDs to names — only fetch the stage reference
+    # data if at least one matched opportunity actually needs it
+    if any(isinstance(o.get("stage"), int) for o in all_opps):
+        if cache is not None:
+            stage_map = cache.get_stage_map(client)
+        else:
+            stage_map = {
+                s["id"]: s.get("name", "")
+                for s in client.get_opportunity_stages()
+                if isinstance(s, dict) and "id" in s
+            }
+        for o in all_opps:
+            stage = o.get("stage")
+            if isinstance(stage, int) and stage in stage_map:
+                o["stage_name"] = stage_map[stage]
 
     return {
         "notes": client.enhance_user_info(all_notes, user_map),

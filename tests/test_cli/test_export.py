@@ -546,6 +546,14 @@ class TestRenderOpportunity:
         assert "Stage" not in result
         assert "144686" not in result
 
+    def test_resolved_stage_name_renders(self):
+        """When _fetch_all_activity has resolved the int stage ID to a
+        stage_name (via get_opportunity_stages), the name renders."""
+        opp = {"name": "Deal", "stage": 144686, "stage_name": "Proposal",
+               "target_close": "2026-01-01"}
+        result = _render_opportunity(opp)
+        assert "Stage: Proposal" in result
+
     def test_amounts_array(self):
         """Bug 4: amount lives in amounts array, not top-level amount."""
         opp = {

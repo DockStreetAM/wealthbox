@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from json import JSONDecodeError
 from typing import Any, Iterable
 import time
@@ -114,6 +115,7 @@ class WealthBox:
         rate_limit_retries: int = 5,
         rate_limit_max_wait: int = 120,
         timeout: float | None = 30,
+        page_workers: int = 8,
     ) -> None:
         self.token = token
         self.user_id: int | None = None
@@ -121,6 +123,11 @@ class WealthBox:
         self.timeout = timeout
         self._rate_limit_retries = rate_limit_retries
         self._rate_limit_max_wait = rate_limit_max_wait
+        # The WB API caps per_page at 100 server-side, so a full pull is
+        # total_count/100 pages; pages 2..N are fetched concurrently.
+        self._page_workers = max(1, page_workers)
+        # custom field definitions per document_type, cached for name→id lookup
+        self._custom_field_cache: dict[str, list[dict[str, Any]]] = {}
 
         # Configure retry strategy
         retry_strategy = Retry(
@@ -221,57 +228,133 @@ class WealthBox:
         return self._request('GET', self.base_url + url_completion)
 
 
+    @staticmethod
+    def _bracketize(params: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite list/tuple param keys to ``key[]`` bracket-array form.
+
+        The Wealthbox API takes only the LAST value of repeated query params
+        (``?k=a&k=b`` → ``b`` wins), which is what ``requests`` emits for list
+        values by default. The bracket form is OR-merged by the API for filters
+        documented as ``array[string]`` (e.g. ``tags``). For scalar-string
+        filters (``contact_type``, ``type``, ...) the API rejects bracket
+        syntax with HTTP 500 — passing a list to a scalar filter is a usage
+        error; fan out client-side instead.
+        """
+        return {
+            (f"{k}[]" if isinstance(v, (list, tuple)) and not k.endswith('[]') else k): v
+            for k, v in params.items()
+        }
+
+    def _fetch_page(
+        self,
+        url: str,
+        params: dict[str, Any],
+        page: int,
+        endpoint: str,
+        key: str,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """Fetch one page, returning (records, total_pages).
+
+        Builds its own param copy with the page number so it is safe to call
+        concurrently across threads.
+        """
+        page_params = {**params, 'page': page}
+        res = self._request('GET', url, params=page_params)
+        res_json = self._json_or_raise(res, 'GET', endpoint)
+        total_pages = res_json['meta']['total_pages']
+        if key not in res_json:
+            raise WealthBoxAPIError(
+                f"Expected key '{key}' not found in response",
+                response=res_json
+            )
+        return res_json[key], total_pages
+
     def api_request(
         self,
         endpoint: str,
         params: dict[str, Any] | None = None,
-        extract_key: str | None = None
+        extract_key: str | None = None,
+        max_results: int | None = None,
     ) -> list[dict[str, Any]] | dict[str, Any]:
-        """GET an endpoint, paginating automatically until all pages are fetched.
+        """GET an endpoint, paginating automatically across all pages.
 
-        List/tuple values in ``params`` are auto-converted to bracket-array
-        syntax (``key`` → ``key[]``) so ``requests`` emits ``?key[]=a&key[]=b``.
-        This is necessary because the Wealthbox API takes only the LAST value
-        of repeated query params (``?k=a&k=b`` → ``b`` wins), which is what
-        ``requests`` produces by default for list values. The bracket form is
-        OR-merged by the API for filters documented as ``array[string]`` (e.g.
-        ``tags``). For scalar-string filters (``contact_type``, ``type``, ...)
-        the API rejects bracket syntax with HTTP 500 — passing a list to a
-        scalar filter is a usage error; fan out client-side instead.
+        Pages 2..N are fetched concurrently (``page_workers`` threads) since
+        the WB API caps ``per_page`` at 100 server-side and serves concurrent
+        page requests cleanly — a large pull is many sequential round-trips
+        otherwise. Results are reassembled in page order.
+
+        ``max_results`` stops fetching once that many records are collected
+        (only the pages needed are requested), then truncates to the limit.
+
+        See :meth:`_bracketize` for how list-valued filter params are encoded.
         """
         url = self.base_url + endpoint
-        page = 1
-        total_pages: int | None = None
-        params = dict(params) if params else {}
+        params = self._bracketize(params if params else {})
         params.setdefault('per_page', '500')
-        params = {
-            (f"{k}[]" if isinstance(v, (list, tuple)) and not k.endswith('[]') else k): v
-            for k, v in params.items()
-        }
-        results: list[dict[str, Any]] = []
+        key = (extract_key if extract_key is not None else endpoint).split('/')[-1]
 
-        extract_key = extract_key if extract_key is not None else endpoint
+        # Page 1 — also tells us total_pages and the server's real page size
+        first = {**params, 'page': 1}
+        res_json = self._json_or_raise(
+            self._request('GET', url, params=first), 'GET', endpoint
+        )
+        if 'meta' not in res_json:
+            # Non-paginated endpoint (e.g. /me) returns the bare object
+            return res_json
+        if key not in res_json:
+            raise WealthBoxAPIError(
+                f"Expected key '{key}' not found in response", response=res_json
+            )
 
-        while total_pages is None or page <= total_pages:
-            params['page'] = page
-            res = self._request('GET', url, params=params)
-            res_json = self._json_or_raise(res, 'GET', endpoint)
-            if 'meta' not in res_json:
-                total_pages = 1
-                results = res_json
-            else:
-                total_pages = res_json['meta']['total_pages']
-                # The WB API usually (always?) returns a list of results under a key with the same name as the endpoint
-                key = extract_key.split('/')[-1]
-                if key not in res_json:
-                    raise WealthBoxAPIError(
-                        f"Expected key '{key}' not found in response",
-                        response=res_json
-                    )
-                results.extend(res_json[key])
-            page += 1
+        total_pages = res_json['meta']['total_pages']
+        results: list[dict[str, Any]] = list(res_json[key])
 
-        return results
+        # Decide how many more pages we actually need
+        last_page = total_pages
+        if max_results is not None:
+            if len(results) >= max_results:
+                return results[:max_results]
+            page_size = len(results) or 1
+            still_needed = max_results - len(results)
+            additional_pages = -(-still_needed // page_size)  # ceil division
+            last_page = min(total_pages, 1 + additional_pages)
+
+        if last_page <= 1:
+            return results[:max_results] if max_results is not None else results
+
+        remaining = list(range(2, last_page + 1))
+        by_page: dict[int, list[dict[str, Any]]] = {}
+        with ThreadPoolExecutor(max_workers=self._page_workers) as pool:
+            futures = {
+                pool.submit(self._fetch_page, url, params, p, endpoint, key): p
+                for p in remaining
+            }
+            for fut in futures:
+                by_page[futures[fut]] = fut.result()[0]
+
+        for p in remaining:
+            results.extend(by_page[p])
+
+        return results[:max_results] if max_results is not None else results
+
+    def count(
+        self,
+        endpoint: str,
+        params: dict[str, Any] | None = None,
+    ) -> int:
+        """Return total record count for a list endpoint without fetching it.
+
+        Issues a single ``per_page=1`` request and reads ``meta.total_count``.
+        """
+        url = self.base_url + endpoint
+        req_params = self._bracketize(params if params else {})
+        req_params['per_page'] = '1'
+        req_params['page'] = 1
+        res_json = self._json_or_raise(
+            self._request('GET', url, params=req_params), 'GET', endpoint
+        )
+        meta = res_json.get('meta', {})
+        return meta.get('total_count', 0)
 
     def api_put(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
         data = self._normalize_write_data(data)
@@ -302,9 +385,14 @@ class WealthBox:
         return self._json_or_raise(res, 'GET', endpoint)
 
     def get_contacts(
-        self, filters: dict[str, Any] | None = None
+        self,
+        filters: dict[str, Any] | None = None,
+        max_results: int | None = None,
     ) -> list[dict[str, Any]]:
         """Get contacts, optionally filtered. Paginates automatically.
+
+        ``max_results`` caps the number returned and stops paginating early,
+        so a small slice of a large workspace doesn't pull every page.
 
         Filter keys (https://dev.wealthbox.com/#contacts is authoritative;
         the names below may rot):
@@ -332,7 +420,7 @@ class WealthBox:
                     if c["id"] not in seen:
                         seen.add(c["id"]); out.append(c)
         """
-        return self.api_request('contacts', params=filters)
+        return self.api_request('contacts', params=filters, max_results=max_results)
 
     def get_contact_by_name(self, name: str) -> list[dict[str, Any]]:
         return self.get_contacts({'name': name})
@@ -711,6 +799,34 @@ class WealthBox:
     def get_categories(self, cat_type: str) -> list[dict[str, Any]]:
         return self.api_request(f'categories/{cat_type}')
 
+    # Convenience wrappers over get_categories for the documented subtypes.
+    # These return reference lists of {id, name, ...} used to resolve the
+    # integer IDs that other resources reference (e.g. opportunity stage IDs).
+
+    def get_opportunity_stages(self) -> list[dict[str, Any]]:
+        """List opportunity stages (id → name reference data)."""
+        return self.get_categories('opportunity_stages')
+
+    def get_note_categories(self) -> list[dict[str, Any]]:
+        """List note categories."""
+        return self.get_categories('note_categories')
+
+    def get_event_categories(self) -> list[dict[str, Any]]:
+        """List event categories."""
+        return self.get_categories('event_categories')
+
+    def get_project_statuses(self) -> list[dict[str, Any]]:
+        """List project statuses."""
+        return self.get_categories('project_statuses')
+
+    def get_task_categories(self) -> list[dict[str, Any]]:
+        """List task categories."""
+        return self.get_categories('task_categories')
+
+    def get_contact_types(self) -> list[dict[str, Any]]:
+        """List contact types (Client, Prospect, ...)."""
+        return self.get_categories('contact_types')
+
     def get_tags(self, document_type: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}
         if document_type:
@@ -791,6 +907,51 @@ class WealthBox:
         """
         return self.api_delete(f'household_members/{household_id}/{contact_id}')
 
+    def get_household_members(
+        self, household_contact: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Fetch full member contacts from a household contact's member refs.
+
+        Each ``members`` entry is a stub ({id, type, first_name, ...}); this
+        fetches the full contact for each via :meth:`get_contact`. Handles both
+        ``{"contact": {"id": N}}`` and ``{"id": N}`` member-ref shapes.
+        """
+        members: list[dict[str, Any]] = []
+        for member_ref in household_contact.get("members", []):
+            inner = member_ref.get("contact", member_ref)
+            member_id = inner.get("id") if isinstance(inner, dict) else None
+            if member_id:
+                members.append(self.get_contact(member_id))
+        return members
+
+    def resolve_household(
+        self, contact: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """Resolve a contact's household into (members, household_info).
+
+        - If ``contact`` is itself a Household, returns its members.
+        - If it belongs to a household, fetches that household's members.
+        - Otherwise returns ``([contact], None)``.
+
+        Members fall back to ``[contact]`` if the household lists none.
+        ``household_info`` is ``{"id", "name"}`` or ``None``. Related/Linked
+        Contacts (parent/child) are NOT available via the API — household
+        membership is the only structured relationship data WB exposes.
+        """
+        if contact.get("type", "") == "Household":
+            members = self.get_household_members(contact) or [contact]
+            return members, {"id": contact.get("id"), "name": contact.get("name", "")}
+
+        hh_ref = contact.get("household") or {}
+        hh_id = hh_ref.get("id")
+        if hh_id:
+            hh_contact = self.get_contact(hh_id)
+            hh_name = hh_contact.get("name", hh_ref.get("name", ""))
+            members = self.get_household_members(hh_contact) or [contact]
+            return members, {"id": hh_id, "name": hh_name}
+
+        return [contact], None
+
     def get_my_user_id(self) -> int:
         # This endpoint doesn't have a 'meta'?
         self.user_id = self.api_request('me')['current_user']['id']
@@ -809,14 +970,74 @@ class WealthBox:
             params = {'document_type': document_type}
         return self.api_request('categories/custom_fields', params=params)
 
+    def _custom_field_defs(self, document_type: str) -> list[dict[str, Any]]:
+        """Return (and cache) the custom field definitions for a document type."""
+        if document_type not in self._custom_field_cache:
+            self._custom_field_cache[document_type] = self.get_custom_fields(document_type)
+        return self._custom_field_cache[document_type]
+
+    def build_custom_fields_payload(
+        self, document_type: str, values: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Map ``{field_name: value}`` to the API write shape ``[{id, value}]``.
+
+        The API writes custom fields by field **id** (not name), so this looks
+        up each name in the definitions for ``document_type`` (e.g. 'Contact',
+        'Task') and emits ``{"id": <field_id>, "value": value}``. Raises
+        ``ValueError`` on an unknown field name, or — for single_select fields —
+        an unknown option (listing valid choices). Per the WB docs the value is
+        the option label for selects; the exact wire format for selects was not
+        verified against a live write.
+        """
+        defs = self._custom_field_defs(document_type)
+        by_name = {d["name"].lower(): d for d in defs if d.get("name")}
+        payload: list[dict[str, Any]] = []
+        for name, value in values.items():
+            d = by_name.get(name.lower())
+            if d is None:
+                available = ", ".join(sorted(x["name"] for x in defs if x.get("name")))
+                raise ValueError(
+                    f"No custom field named {name!r} for {document_type}; "
+                    f"available: {available}"
+                )
+            options = d.get("options") or []
+            if d.get("field_type") == "single_select" and options:
+                labels = [o.get("label") for o in options if isinstance(o, dict)]
+                if value not in labels:
+                    raise ValueError(
+                        f"{value!r} is not a valid option for {name!r}; "
+                        f"choices: {', '.join(l for l in labels if l)}"
+                    )
+            payload.append({"id": d["id"], "value": value})
+        return payload
+
+    @staticmethod
+    def get_custom_field_value(record: dict[str, Any], name: str) -> Any:
+        """Read a custom field's value from a contact/record by name (case-insensitive).
+
+        Returns ``None`` if the field is absent. Generic form of the Dock-Street
+        'Orion Household' lookup (e.g. ``get_custom_field_value(c, 'Orion Household')``).
+        """
+        for cf in record.get("custom_fields", []) or []:
+            if isinstance(cf, dict) and cf.get("name", "").lower() == name.lower():
+                return cf.get("value")
+        return None
+
     def update_contact(
         self,
         contact_id: int,
         updates_dict: dict[str, Any],
-        custom_field: Any = None
+        custom_fields: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        # TODO: Add custom field update
-        return self.api_put(f'contacts/{contact_id}', updates_dict)
+        """Update a contact. ``custom_fields`` is an optional ``{name: value}``
+        dict resolved to the API's ``[{id, value}]`` write shape via
+        :meth:`build_custom_fields_payload`."""
+        data = dict(updates_dict)
+        if custom_fields:
+            data["custom_fields"] = self.build_custom_fields_payload(
+                "Contact", custom_fields
+            )
+        return self.api_put(f'contacts/{contact_id}', data)
 
     def get_notes_with_comments(self, contact_id: int) -> list[dict[str, Any]]:
         notes = self.get_notes(contact_id)

@@ -50,9 +50,8 @@ def list_contacts(
     if updated_since:
         params["updated_since"] = updated_since
 
-    data = client.get_contacts(filters=params)
-    if limit:
-        data = data[:limit]
+    # max_results stops pagination early instead of pulling every page
+    data = client.get_contacts(filters=params, max_results=limit)
     handle_output(ctx, data, **kwargs)
 
 

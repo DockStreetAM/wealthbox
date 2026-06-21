@@ -37,38 +37,97 @@ class TestApiRequest:
 
     @responses.activate
     def test_pagination_multiple_pages(self, wb):
-        responses.add(
-            responses.GET,
-            f"{BASE_URL}contacts",
-            json={
-                "contacts": [{"id": 1}],
-                "meta": {"total_pages": 3}
-            },
-            status=200
-        )
-        responses.add(
-            responses.GET,
-            f"{BASE_URL}contacts",
-            json={
-                "contacts": [{"id": 2}],
-                "meta": {"total_pages": 3}
-            },
-            status=200
-        )
-        responses.add(
-            responses.GET,
-            f"{BASE_URL}contacts",
-            json={
-                "contacts": [{"id": 3}],
-                "meta": {"total_pages": 3}
-            },
-            status=200
-        )
+        # Key each page off ?page= so the concurrent fetch of pages 2..3
+        # is deterministic (mirrors the real API).
+        for p in (1, 2, 3):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}contacts",
+                json={"contacts": [{"id": p}], "meta": {"total_pages": 3}},
+                status=200,
+                match=[responses.matchers.query_param_matcher(
+                    {"page": str(p), "per_page": "500"}
+                )],
+            )
 
         result = wb.api_request("contacts")
 
         assert result == [{"id": 1}, {"id": 2}, {"id": 3}]
         assert len(responses.calls) == 3
+
+    @responses.activate
+    def test_pagination_concurrent_preserves_order(self, wb):
+        # Register each page keyed off the ?page= param so order is
+        # deterministic regardless of which worker thread arrives first.
+        total = 5
+        for p in range(1, total + 1):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}contacts",
+                json={"contacts": [{"id": p}], "meta": {"total_pages": total}},
+                status=200,
+                match=[responses.matchers.query_param_matcher(
+                    {"page": str(p), "per_page": "500"}
+                )],
+            )
+
+        result = wb.api_request("contacts")
+
+        # Reassembled in page order even though pages 2..5 ran concurrently
+        assert [r["id"] for r in result] == [1, 2, 3, 4, 5]
+
+    @responses.activate
+    def test_max_results_stops_early(self, wb):
+        # 10 pages of 2 records each; max_results=3 should fetch only
+        # page 1 (2 recs) + page 2 (enough), never pages 3..10.
+        for p in range(1, 11):
+            responses.add(
+                responses.GET,
+                f"{BASE_URL}contacts",
+                json={
+                    "contacts": [{"id": p * 10 + 1}, {"id": p * 10 + 2}],
+                    "meta": {"total_pages": 10},
+                },
+                status=200,
+                match=[responses.matchers.query_param_matcher(
+                    {"page": str(p), "per_page": "500"}
+                )],
+            )
+
+        result = wb.api_request("contacts", max_results=3)
+
+        assert len(result) == 3
+        assert len(responses.calls) == 2  # only pages 1 and 2 fetched
+
+    @responses.activate
+    def test_max_results_within_first_page(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={
+                "contacts": [{"id": 1}, {"id": 2}, {"id": 3}],
+                "meta": {"total_pages": 4},
+            },
+            status=200,
+        )
+
+        result = wb.api_request("contacts", max_results=2)
+
+        assert result == [{"id": 1}, {"id": 2}]
+        assert len(responses.calls) == 1  # never fetched page 2
+
+    @responses.activate
+    def test_count_single_request(self, wb):
+        responses.add(
+            responses.GET,
+            f"{BASE_URL}contacts",
+            json={"contacts": [{"id": 1}], "meta": {"total_count": 4022, "total_pages": 4022}},
+            status=200,
+        )
+
+        assert wb.count("contacts") == 4022
+        assert len(responses.calls) == 1
+        assert responses.calls[0].request.params["per_page"] == "1"
 
     @responses.activate
     def test_response_without_meta(self, wb):
@@ -1314,6 +1373,72 @@ class TestHouseholdMembersEndpoints:
 
         assert result is True
 
+
+class TestResolveHousehold:
+    @responses.activate
+    def test_household_contact_resolves_members(self, wb):
+        household = {
+            "id": 1, "type": "Household", "name": "Smith Household",
+            "members": [{"id": 10}, {"id": 11}],
+        }
+        for mid in (10, 11):
+            responses.add(
+                responses.GET, f"{BASE_URL}contacts/{mid}",
+                json={"id": mid, "name": f"Member {mid}"}, status=200,
+            )
+
+        members, hh = wb.resolve_household(household)
+
+        assert {m["id"] for m in members} == {10, 11}
+        assert hh == {"id": 1, "name": "Smith Household"}
+
+    @responses.activate
+    def test_member_contact_fetches_its_household(self, wb):
+        person = {"id": 10, "type": "Person", "household": {"id": 1, "name": "Smith"}}
+        responses.add(
+            responses.GET, f"{BASE_URL}contacts/1",
+            json={"id": 1, "type": "Household", "name": "Smith Household",
+                  "members": [{"id": 10}]}, status=200,
+        )
+        responses.add(
+            responses.GET, f"{BASE_URL}contacts/10",
+            json={"id": 10, "name": "John Smith"}, status=200,
+        )
+
+        members, hh = wb.resolve_household(person)
+
+        assert [m["id"] for m in members] == [10]
+        assert hh["id"] == 1
+
+    def test_contact_with_no_household(self, wb):
+        person = {"id": 10, "type": "Person"}
+        members, hh = wb.resolve_household(person)
+        assert members == [person]
+        assert hh is None
+
+
+class TestCategoryWrappers:
+    @pytest.mark.parametrize("method,cat_type", [
+        ("get_opportunity_stages", "opportunity_stages"),
+        ("get_note_categories", "note_categories"),
+        ("get_event_categories", "event_categories"),
+        ("get_project_statuses", "project_statuses"),
+        ("get_task_categories", "task_categories"),
+        ("get_contact_types", "contact_types"),
+    ])
+    @responses.activate
+    def test_wrapper_hits_category_endpoint(self, wb, method, cat_type):
+        responses.add(
+            responses.GET, f"{BASE_URL}categories/{cat_type}",
+            json={cat_type: [{"id": 1, "name": "X"}], "meta": {"total_pages": 1}},
+            status=200,
+        )
+
+        result = getattr(wb, method)()
+
+        assert result == [{"id": 1, "name": "X"}]
+        assert f"categories/{cat_type}" in responses.calls[0].request.url
+
     @responses.activate
     def test_add_household_member_invalid_contact(self, wb):
         responses.add(
@@ -1996,3 +2121,79 @@ class TestTimeout:
             params = {"type": "Person"}
             wb.api_request("contacts", params=params)
             assert params == {"type": "Person"}
+
+
+class TestCustomFieldsByName:
+    CF_DEFS = {
+        "custom_fields": [
+            {"id": 501, "name": "Orion Household", "field_type": "text", "options": []},
+            {"id": 502, "name": "Plan Type", "field_type": "single_select",
+             "options": [{"label": "Will", "id": 9}, {"label": "Trust", "id": 10}]},
+        ],
+        "meta": {"total_pages": 1},
+    }
+
+    @responses.activate
+    def test_update_contact_maps_name_to_id(self, wb):
+        responses.add(
+            responses.GET, f"{BASE_URL}categories/custom_fields",
+            json=self.CF_DEFS, status=200,
+        )
+        responses.add(
+            responses.PUT, f"{BASE_URL}contacts/7",
+            json={"id": 7}, status=200,
+        )
+
+        wb.update_contact(7, {"first_name": "A"},
+                          custom_fields={"Orion Household": "103"})
+
+        import json as _j
+        body = _j.loads(responses.calls[-1].request.body)
+        assert body["custom_fields"] == [{"id": 501, "value": "103"}]
+        assert body["first_name"] == "A"
+
+    @responses.activate
+    def test_unknown_field_name_raises(self, wb):
+        responses.add(
+            responses.GET, f"{BASE_URL}categories/custom_fields",
+            json=self.CF_DEFS, status=200,
+        )
+        with pytest.raises(ValueError, match="No custom field named 'Nope'"):
+            wb.build_custom_fields_payload("Contact", {"Nope": "x"})
+
+    @responses.activate
+    def test_single_select_unknown_option_raises(self, wb):
+        responses.add(
+            responses.GET, f"{BASE_URL}categories/custom_fields",
+            json=self.CF_DEFS, status=200,
+        )
+        with pytest.raises(ValueError, match="not a valid option for 'Plan Type'"):
+            wb.build_custom_fields_payload("Contact", {"Plan Type": "Guardian"})
+
+    @responses.activate
+    def test_single_select_valid_option(self, wb):
+        responses.add(
+            responses.GET, f"{BASE_URL}categories/custom_fields",
+            json=self.CF_DEFS, status=200,
+        )
+        payload = wb.build_custom_fields_payload("Contact", {"Plan Type": "Trust"})
+        assert payload == [{"id": 502, "value": "Trust"}]
+
+    @responses.activate
+    def test_defs_cached_across_calls(self, wb):
+        responses.add(
+            responses.GET, f"{BASE_URL}categories/custom_fields",
+            json=self.CF_DEFS, status=200,
+        )
+        wb.build_custom_fields_payload("Contact", {"Orion Household": "1"})
+        wb.build_custom_fields_payload("Contact", {"Orion Household": "2"})
+        # definitions fetched once, then served from cache
+        assert sum(1 for c in responses.calls if "custom_fields" in c.request.url) == 1
+
+    def test_get_custom_field_value(self, wb):
+        contact = {"custom_fields": [
+            {"name": "Orion Household", "value": "103"},
+            {"name": "Plan Type", "value": "Trust"},
+        ]}
+        assert wb.get_custom_field_value(contact, "orion household") == "103"
+        assert wb.get_custom_field_value(contact, "Missing") is None
