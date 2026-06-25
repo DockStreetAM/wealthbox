@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.16.0
+**Current version:** 0.17.0
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands
@@ -65,7 +65,7 @@ Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (defaul
 - Projects: `get_projects`, `get_project`, `create_project`, `update_project`, `delete_project`
 
 **Additional Endpoints:**
-- `get_workflow_templates()`, `update_workflow_step()`
+- `get_workflow_templates()`, `complete_workflow_step(workflow_id, step_id, workflow_outcome_id=None)`, `revert_workflow_step(workflow_id, step_id)` — a step is addressed **under its workflow**: `PUT /workflows/{workflow_id}/steps/{step_id}` with body `{"complete": true}` or `{"revert": true}` (both verified live 2026-06-25). There is **no** top-level `workflow_steps/{id}` resource (every shape 404s, including `GET`), and the body flag is **required** — an empty body 404s. For steps that present outcomes, pass `workflow_outcome_id`. The old broken `update_workflow_step` was removed.
 - `get_activity()`, `get_contact_roles()`, `get_user_groups()`
 - `add_household_member()`, `remove_household_member()`, `resolve_household()`, `get_household_members()`
 - `get_users()`, `get_teams()`, `get_categories()`, `get_tags()`, `get_custom_fields()`

@@ -566,13 +566,35 @@ class WealthBox:
         """
         return self.api_request('workflow_templates', params=filters)
 
-    def update_workflow_step(
+    def complete_workflow_step(
         self,
+        workflow_id: int,
         step_id: int,
-        data: dict[str, Any]
+        workflow_outcome_id: int | None = None,
     ) -> dict[str, Any]:
-        """Update a workflow step by ID."""
-        return self.api_put(f'workflow_steps/{step_id}', data)
+        """Mark a workflow step complete.
+
+        ``PUT /workflows/{workflow_id}/steps/{step_id}`` with ``{"complete": true}``
+        (verified live). The step is addressed *under its workflow* — there is no
+        top-level ``workflow_steps/{id}`` resource. For steps that present outcomes,
+        pass ``workflow_outcome_id`` to select which outcome to apply.
+        """
+        data: dict[str, Any] = {"complete": True}
+        if workflow_outcome_id is not None:
+            data["workflow_outcome_id"] = workflow_outcome_id
+        return self.api_put(f'workflows/{workflow_id}/steps/{step_id}', data)
+
+    def revert_workflow_step(
+        self,
+        workflow_id: int,
+        step_id: int,
+    ) -> dict[str, Any]:
+        """Revert a completed workflow step.
+
+        ``PUT /workflows/{workflow_id}/steps/{step_id}`` with ``{"revert": true}``
+        (verified live).
+        """
+        return self.api_put(f'workflows/{workflow_id}/steps/{step_id}', {"revert": True})
 
     def get_events(
         self,

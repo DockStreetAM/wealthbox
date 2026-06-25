@@ -81,11 +81,22 @@ class TestWorkflowsCompleteStep:
     def test_complete_step(self, runner, mock_token):
         responses.add(
             responses.PUT,
-            f"{BASE_URL}workflow_steps/99",
-            json={"id": 99, "completed": True},
+            f"{BASE_URL}workflows/42/steps/99",
+            json={"id": 99, "completed_at": "2026-06-25"},
             status=200,
         )
-        result = runner.invoke(cli, ["workflows", "complete-step", "99", "--json"])
+        result = runner.invoke(cli, ["workflows", "complete-step", "42", "99", "--json"])
         assert result.exit_code == 0
-        body = json.loads(responses.calls[0].request.body)
-        assert body["completed"] is True
+        assert json.loads(responses.calls[0].request.body) == {"complete": True}
+
+    @responses.activate
+    def test_revert_step(self, runner, mock_token):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}workflows/42/steps/99",
+            json={"id": 99, "completed_at": ""},
+            status=200,
+        )
+        result = runner.invoke(cli, ["workflows", "revert-step", "42", "99", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(responses.calls[0].request.body) == {"revert": True}

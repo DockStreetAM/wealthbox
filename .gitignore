@@ -1,6 +1,7 @@
 dist/*
 .venv/
 __pycache__/
-*.pyc.env
+*.pyc
+.env
 .DS_Store
 exports/

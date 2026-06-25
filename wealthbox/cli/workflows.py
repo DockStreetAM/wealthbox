@@ -94,22 +94,26 @@ def delete_workflow(client, workflow_id: int, confirm: bool) -> None:
 
 
 @workflows.command("complete-step")
+@click.argument("workflow_id", type=int)
 @click.argument("step_id", type=int)
+@click.option("--outcome-id", type=int, default=None,
+              help="ID of the outcome to apply, for steps that present outcomes.")
 @output_options
 @pass_client(write=True)
-def complete_step(client, step_id: int, **kwargs) -> None:
-    """Mark a workflow step as completed."""
+def complete_step(client, workflow_id: int, step_id: int, outcome_id, **kwargs) -> None:
+    """Mark a workflow step as completed (WORKFLOW_ID STEP_ID)."""
     ctx = click.get_current_context()
-    result = client.update_workflow_step(step_id, {"completed": True})
+    result = client.complete_workflow_step(workflow_id, step_id, outcome_id)
     handle_output(ctx, result, **kwargs)
 
 
 @workflows.command("revert-step")
+@click.argument("workflow_id", type=int)
 @click.argument("step_id", type=int)
 @output_options
 @pass_client(write=True)
-def revert_step(client, step_id: int, **kwargs) -> None:
-    """Revert a workflow step to incomplete."""
+def revert_step(client, workflow_id: int, step_id: int, **kwargs) -> None:
+    """Revert a workflow step to incomplete (WORKFLOW_ID STEP_ID)."""
     ctx = click.get_current_context()
-    result = client.update_workflow_step(step_id, {"completed": False})
+    result = client.revert_workflow_step(workflow_id, step_id)
     handle_output(ctx, result, **kwargs)

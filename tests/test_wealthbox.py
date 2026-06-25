@@ -1,4 +1,5 @@
 import datetime
+import json
 import pytest
 import responses
 from wealthbox import (
@@ -1061,17 +1062,48 @@ class TestWorkflowEndpoints:
         assert result == [{"id": 1, "name": "Template 1"}]
 
     @responses.activate
-    def test_update_workflow_step(self, wb):
+    def test_complete_workflow_step(self, wb):
         responses.add(
             responses.PUT,
-            f"{BASE_URL}workflow_steps/123",
-            json={"id": 123, "completed": True},
+            f"{BASE_URL}workflows/55/steps/123",
+            json={"id": 123, "completed_at": "2026-06-25"},
             status=200
         )
 
-        result = wb.update_workflow_step(123, {"completed": True})
+        result = wb.complete_workflow_step(55, 123)
 
-        assert result == {"id": 123, "completed": True}
+        assert result == {"id": 123, "completed_at": "2026-06-25"}
+        # Step is addressed under its workflow, with a {"complete": true} body.
+        assert json.loads(responses.calls[0].request.body) == {"complete": True}
+
+    @responses.activate
+    def test_complete_workflow_step_with_outcome(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}workflows/55/steps/123",
+            json={"id": 123, "completed_at": "2026-06-25"},
+            status=200
+        )
+
+        wb.complete_workflow_step(55, 123, workflow_outcome_id=7)
+
+        assert json.loads(responses.calls[0].request.body) == {
+            "complete": True, "workflow_outcome_id": 7
+        }
+
+    @responses.activate
+    def test_revert_workflow_step(self, wb):
+        responses.add(
+            responses.PUT,
+            f"{BASE_URL}workflows/55/steps/123",
+            json={"id": 123, "completed_at": ""},
+            status=200
+        )
+
+        result = wb.revert_workflow_step(55, 123)
+
+        assert result == {"id": 123, "completed_at": ""}
+        assert json.loads(responses.calls[0].request.body) == {"revert": True}
 
 
 class TestEventEndpoints:
