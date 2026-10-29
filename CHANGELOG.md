@@ -5,7 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.18.1] - 2026-10-28
+## [0.18.2] - 2026-10-28
+
+Re-release of 0.18.1, whose publish failed (never reached PyPI): the pinned
+`pypa/gh-action-pypi-publish` v1.9.0 couldn't read Metadata-Version 2.4 wheels.
+Bumped to v1.14.3. No code changes from 0.18.1.
+
+## [0.18.1] - 2026-10-28 (not published)
 
 ### Added
 - `wb auth set-token --from-env PATH` copies the token from a `.env` file (the one-step
