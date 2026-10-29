@@ -28,6 +28,13 @@ from wealthbox import __version__
 @click.option("--timeout", type=int, default=60, help="Request timeout in seconds")
 @click.option("--retry", type=int, default=3, help="Number of retries on failure")
 @click.option("--dry-run", is_flag=True, help="Preview write operations without executing")
+@click.option(
+    "--env-file",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Read WEALTHBOX_ACCESS_TOKEN from this .env file. A .env in the "
+    "current directory is no longer loaded automatically.",
+)
 @click.pass_context
 def cli(
     ctx: click.Context,
@@ -44,6 +51,7 @@ def cli(
     timeout: int,
     retry: int,
     dry_run: bool,
+    env_file: str | None,
 ) -> None:
     """WealthBox CRM command line interface.
 
@@ -51,8 +59,16 @@ def cli(
     both human users and AI agents.
 
     \b
+    Token lookup order:
+      1. WEALTHBOX_ACCESS_TOKEN environment variable
+      2. --env-file PATH (explicit opt-in)
+      3. ~/.config/wealthbox/credentials.json (wb auth set-token)
+      4. ~/.config/wealthbox/.env
+    A .env in the current directory is NOT read automatically.
+
+    \b
     Quick start:
-      export WEALTHBOX_ACCESS_TOKEN="your-token"
+      wb auth set-token                     # prompts; keeps token out of history
       wb contacts list --limit 5
       wb contacts get 12345
 
@@ -80,6 +96,7 @@ def cli(
     ctx.obj["timeout"] = timeout
     ctx.obj["retry"] = retry
     ctx.obj["dry_run"] = dry_run
+    ctx.obj["env_file"] = env_file
 
 
 # Import and register command groups

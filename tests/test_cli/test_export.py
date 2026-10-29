@@ -678,6 +678,22 @@ def _register_users_endpoint():
     )
 
 
+def _register_empty_notes_events():
+    """Register empty /notes and /events for incremental change detection."""
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}notes",
+        json={"status_updates": [], "meta": {"total_pages": 1}},
+        status=200,
+    )
+    responses.add(
+        responses.GET,
+        f"{BASE_URL}events",
+        json={"events": [], "meta": {"total_pages": 1}},
+        status=200,
+    )
+
+
 def _register_single_contact(contact_id, contact_data):
     """Register a GET /contacts/<id> endpoint."""
     responses.add(
@@ -1939,6 +1955,7 @@ class TestFindDirtyContacts:
             status=200,
         )
 
+        _register_empty_notes_events()
         cache = ExportCache()
         result = find_dirty_contacts(client, last_export, cache)
         assert result is not None
@@ -1980,6 +1997,7 @@ class TestFindDirtyContacts:
             status=200,
         )
 
+        _register_empty_notes_events()
         cache = ExportCache()
         result = find_dirty_contacts(client, last_export, cache)
         assert result is not None
@@ -2041,6 +2059,7 @@ class TestFindDirtyContacts:
             status=200,
         )
 
+        _register_empty_notes_events()
         cache = ExportCache()
         result = find_dirty_contacts(client, last_export, cache)
         assert result is not None
@@ -2087,6 +2106,7 @@ class TestFindDirtyContacts:
             status=200,
         )
 
+        _register_empty_notes_events()
         cache = ExportCache()
         result = find_dirty_contacts(client, last_export, cache)
         assert result is not None
@@ -2151,6 +2171,7 @@ class TestFindDirtyContacts:
             status=200,
         )
 
+        _register_empty_notes_events()
         cache = ExportCache()
         result = find_dirty_contacts(client, last_export, cache)
         assert result is not None
@@ -2223,6 +2244,7 @@ class TestFindDirtyContacts:
             status=200,
         )
 
+        _register_empty_notes_events()
         cache = ExportCache()
         result = find_dirty_contacts(client, last_export, cache)
         assert result is not None
@@ -2273,6 +2295,7 @@ class TestFindDirtyContacts:
         )
         # No comments should be fetched for the old task
 
+        _register_empty_notes_events()
         cache = ExportCache()
         result = find_dirty_contacts(client, last_export, cache, comment_lookback_days=30)
         assert result is not None
@@ -2383,6 +2406,8 @@ class TestIncrementalExportAll:
             json={"opportunities": [], "meta": {"total_pages": 1}},
             status=200,
         )
+
+        _register_empty_notes_events()
 
         # Phase contacts (person 100 still exists but is clean)
         _register_contact_phases(

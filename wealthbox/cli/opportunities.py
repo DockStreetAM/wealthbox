@@ -6,7 +6,7 @@ from typing import Any
 
 import click
 
-from .common import handle_output, output_options, pass_client
+from .common import handle_output, output_options, parse_set_fields, pass_client
 
 
 @click.group()
@@ -32,13 +32,14 @@ def list_opportunities(
 ) -> None:
     """List opportunities with optional filters."""
     ctx = click.get_current_context()
-    data = client.get_opportunities(
-        resource_id=resource_id,
-        order=order,
-        include_closed=include_closed,
-    )
-    if limit:
-        data = data[:limit]
+    # Same params as client.get_opportunities, via api_request so --limit
+    # stops paginating early instead of fetching everything then slicing
+    params: dict[str, Any] = {"order": order}
+    if resource_id is not None:
+        params["resource_id"] = resource_id
+    if include_closed:
+        params["include_closed"] = "true"
+    data = client.api_request("opportunities", params=params, max_results=limit)
     handle_output(ctx, data, **kwargs)
 
 
@@ -124,9 +125,7 @@ def update_opportunity(
         data["value"] = value
     if stage:
         data["stage"] = stage
-    for fv in set_fields:
-        key, _, val = fv.partition("=")
-        data[key] = val
+    data.update(parse_set_fields(set_fields))
 
     result = client.update_opportunity(opportunity_id, data)
     handle_output(ctx, result, **kwargs)

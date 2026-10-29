@@ -22,12 +22,61 @@ class TestLoadToken:
         monkeypatch.chdir(tmp_path)
         assert load_token() == "env_token"
 
-    def test_from_dotenv_file(self, monkeypatch, tmp_path):
+    def test_cwd_dotenv_not_loaded(self, monkeypatch, tmp_path):
+        """A .env in CWD must not supply (or override) the token.
+
+        Replaces the old test_from_dotenv_file, which asserted the CWD .env
+        WAS loaded — a cloned repo's .env could silently swap workspaces.
+        """
         monkeypatch.delenv("WEALTHBOX_ACCESS_TOKEN", raising=False)
-        env_file = tmp_path / ".env"
-        env_file.write_text("WEALTHBOX_ACCESS_TOKEN=dotenv_token_456")
+        (tmp_path / ".env").write_text("WEALTHBOX_ACCESS_TOKEN=attacker_token")
         monkeypatch.chdir(tmp_path)
-        assert load_token() == "dotenv_token_456"
+        creds_file = tmp_path / "creds" / "credentials.json"
+        creds_file.parent.mkdir()
+        creds_file.write_text(json.dumps({"access_token": "stored_token"}))
+        from wealthbox.cli import config
+        monkeypatch.setattr(config, "get_credentials_path", lambda: creds_file)
+        assert load_token() == "stored_token"
+
+    def test_explicit_env_file(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("WEALTHBOX_ACCESS_TOKEN", raising=False)
+        env_file = tmp_path / "my.env"
+        env_file.write_text("WEALTHBOX_ACCESS_TOKEN=dotenv_token_456")
+        from wealthbox.cli import config
+        monkeypatch.setattr(config, "get_credentials_path", lambda: tmp_path / "nope" / "credentials.json")
+        assert load_token(env_file=env_file) == "dotenv_token_456"
+
+    def test_config_dir_env_below_credentials(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("WEALTHBOX_ACCESS_TOKEN", raising=False)
+        cfg = tmp_path / "cfg"
+        cfg.mkdir()
+        (cfg / ".env").write_text("WEALTHBOX_ACCESS_TOKEN=cfg_env_token")
+        creds_file = cfg / "credentials.json"
+        from wealthbox.cli import config
+        monkeypatch.setattr(config, "get_credentials_path", lambda: creds_file)
+        # No credentials file yet: config-dir .env is used
+        assert load_token() == "cfg_env_token"
+        # Credentials file wins once present
+        creds_file.write_text(json.dumps({"access_token": "stored_token"}))
+        assert load_token() == "stored_token"
+
+    def test_env_file_cli_option(self, monkeypatch, tmp_path):
+        """wb --env-file PATH feeds the token to the client."""
+        import responses as rsps
+        from click.testing import CliRunner
+        from wealthbox.cli.main import cli
+
+        monkeypatch.delenv("WEALTHBOX_ACCESS_TOKEN", raising=False)
+        from wealthbox.cli import config
+        monkeypatch.setattr(config, "get_credentials_path", lambda: tmp_path / "nope" / "credentials.json")
+        env_file = tmp_path / "x.env"
+        env_file.write_text("WEALTHBOX_ACCESS_TOKEN=from_env_file")
+        with rsps.RequestsMock() as mock:
+            mock.add(rsps.GET, "https://api.crmworkspace.com/v1/me",
+                     json={"current_user": {"name": "U"}}, status=200)
+            result = CliRunner().invoke(cli, ["--env-file", str(env_file), "auth", "test"])
+            assert result.exit_code == 0, result.output
+            assert mock.calls[0].request.headers["ACCESS_TOKEN"] == "from_env_file"
 
     def test_from_credentials_file(self, monkeypatch, tmp_path):
         monkeypatch.delenv("WEALTHBOX_ACCESS_TOKEN", raising=False)

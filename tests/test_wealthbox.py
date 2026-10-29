@@ -4,6 +4,7 @@ import pytest
 import responses
 from wealthbox import (
     WealthBox, WealthBoxAPIError, WealthBoxResponseError, WealthBoxRateLimitError,
+    WealthBoxConnectionError,
     filter_by_date, filter_by_tag, normalize_tags, sort_and_limit,
 )
 
@@ -766,7 +767,7 @@ class TestCreateTask:
             responses.GET,
             f"{BASE_URL}categories/custom_fields",
             json={
-                "custom_fields": [{"name": "Priority Level"}],
+                "custom_fields": [{"id": 77, "name": "Priority Level"}],
                 "meta": {"total_pages": 1}
             },
             status=200
@@ -781,9 +782,9 @@ class TestCreateTask:
         wb.create_task("Task", assigned_to="User", due_date=datetime.date(2024, 1, 1),
                        Priority_Level="High")
 
-        post_body = responses.calls[-1].request.body.decode()
-        assert "Priority Level" in post_body
-        assert "High" in post_body
+        # The API writes custom fields by id: [{id, value}], not {name: value}
+        body = json.loads(responses.calls[-1].request.body)
+        assert body["custom_fields"] == [{"id": 77, "value": "High"}]
 
 
 class TestGetNotes:

@@ -124,9 +124,9 @@ class ExportMetadata:
             "version": self.version,
             "contact_files": {str(k): v for k, v in self.contact_files.items()},
         }
-        with open(path, "w") as f:
-            _json.dump(data, f, indent=2)
-            f.write("\n")
+        from .output import write_private_file
+
+        write_private_file(path, _json.dumps(data, indent=2) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +197,37 @@ def find_dirty_contacts(
         if _is_after(changed_at, last_export):
             dirty.update(_collect_linked_ids(opp))
 
-    # 4. Comments on recent tasks (within lookback window)
+    # 4. Notes and events created or updated since last export. Adding a
+    # note/event may not bump the contact's own updated_at, and notes are
+    # the core of the exported timeline. updated_since narrows the fetch
+    # server-side; the client-side check keeps this correct even if an
+    # endpoint ignores the filter. Records without dates count as changed.
+    # (Workflows aren't checked: the API has no updated_since filter for
+    # them and step completions may not touch the workflow's timestamps.)
+    import click
+
+    from wealthbox import WealthBoxAPIError
+
+    since = last_export.isoformat()
+    for endpoint, key in (("notes", "status_updates"), ("events", "events")):
+        try:
+            items = client.api_request(
+                endpoint, params={"updated_since": since}, extract_key=key
+            )
+        except WealthBoxAPIError as exc:
+            # Endpoint rejected the query: a full export is slow but correct
+            click.echo(
+                f"Warning: could not check {endpoint} for changes ({exc}); "
+                "exporting all contacts",
+                err=True,
+            )
+            return None
+        for item in items:
+            changed_at = item.get("updated_at") or item.get("created_at")
+            if changed_at is None or _is_after(changed_at, last_export):
+                dirty.update(_collect_linked_ids(item))
+
+    # 5. Comments on recent tasks (within lookback window)
     lookback_cutoff = last_export - timedelta(days=comment_lookback_days)
     for task in cache.get_all_tasks(client):
         task_date = _parse_wb_date(task.get("created_at"))

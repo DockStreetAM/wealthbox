@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.17.2
+**Current version:** 0.18.0
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands
@@ -44,10 +44,13 @@ All request paths raise `WealthBoxAPIError` on 4xx/5xx with the status code, met
 - `WealthBoxAPIError` - API returned unexpected response (includes `response` dict)
 - `WealthBoxResponseError` - Failed to parse response (includes `response_text`)
 - `WealthBoxRateLimitError` - 429 response (includes `retry_after` seconds)
+- `WealthBoxConnectionError` - network failure/timeout after retries (original `requests` exception is `__cause__`)
+
+`WealthBoxAPIError` carries `status_code` when it came from an HTTP response; the CLI maps it to exit codes (404→3, 400/422→4, 401/403→2, connection→6).
 
 ### WealthBox Class
 
-Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (default 0.5), `timeout` (default 30s, passed to every request). Uses `requests.Session` with automatic retry on 500/502/503/504 errors for GET/PUT/DELETE — POST is deliberately not retried so a create that succeeded server-side can't be replayed into a duplicate. All requests funnel through `_request()`, which also sleeps/retries on 429 rate limits.
+Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (default 0.5), `timeout` (default 30s, passed to every request). Uses `requests.Session` with automatic retry on 500/502/503/504 errors for GET/PUT/DELETE — POST is deliberately not retried so a create that succeeded server-side can't be replayed into a duplicate. All requests funnel through `_request()`, which also sleeps/retries on 429 rate limits. Redirects are **never followed** (a 3xx raises) so the custom `ACCESS_TOKEN` header can't leak to another host, and 5xx retries ignore `Retry-After` so a 503 can't stall the client. Every id interpolated into a URL path goes through `WealthBox._id()` (positive int or digit-only string, else `ValueError`) to block path/query injection.
 
 **Core Methods:**
 - `api_request()` - GET with automatic pagination. Pages 2..N are fetched **concurrently** (`page_workers`, default 8) since the API caps `per_page` at 100 server-side — ~6x faster on large pulls. Accepts `max_results` to stop paginating early (only the needed pages are fetched).
@@ -92,6 +95,8 @@ Constructor accepts `token`, `max_retries` (default 3), `backoff_factor` (defaul
 API responses use the endpoint name as the key for result arrays (e.g., `/contacts` returns `{"contacts": [...], "meta": {...}}`). Exception: `/notes` returns `{"status_updates": [...]}`.
 
 **Tag shape asymmetry:** write bodies want `tags` as an array of name strings (`["Clients"]`); read responses return objects (`[{"id": 1, "name": "Clients"}]`). Sending the object shape on a write fails with HTTP 400. `api_post`/`api_put` normalize `tags` via `normalize_tags()` automatically, so records read from the API can be written back as-is.
+
+**Nested contact arrays merge by id (verified live 2026-10-28):** in `PUT /contacts/{id}`, `email_addresses` / `phone_numbers` / `street_addresses` entries without an `id` are **appended** as new non-primary entries (existing ones are kept); entries with `id` are updated in place; `{"id": N, "destroy": true}` removes one. So `wb contacts update --email/--phone` adds, never replaces.
 
 **Contacts tag filter:** the read filter key is `tags` (list, serialized as `tags[]=`). A bare `tag=` param is silently ignored by the API and returns the full unfiltered contact list (verified live).
 

@@ -30,9 +30,12 @@ def list_workflows(
 ) -> None:
     """List workflows with optional filters."""
     ctx = click.get_current_context()
-    data = client.get_workflows(resource_id=resource_id, status=status)
-    if limit:
-        data = data[:limit]
+    # Same params as client.get_workflows (active contact workflows by
+    # default), via api_request so --limit stops paginating early
+    params: dict[str, Any] = {"resource_type": "contact", "status": status or "active"}
+    if resource_id is not None:
+        params["resource_id"] = resource_id
+    data = client.api_request("workflows", params=params, max_results=limit)
     handle_output(ctx, data, **kwargs)
 
 

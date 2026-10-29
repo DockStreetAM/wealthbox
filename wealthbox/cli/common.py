@@ -58,17 +58,20 @@ def pass_client(write: bool = False) -> Callable:
 
             # Check dry-run mode for write operations
             if write and obj.get("dry_run"):
-                click.echo("Dry run: would execute write operation (skipped)")
+                # stderr, so --json consumers still get parseable stdout
+                click.echo("Dry run: would execute write operation (skipped)", err=True)
                 return
 
             # Get or create client
             client = obj.get("client")
             if client is None:
-                token = load_token()
+                token = load_token(env_file=obj.get("env_file"))
                 if not token:
                     die(
                         "AUTH_REQUIRED",
-                        "No API token found. Set WEALTHBOX_ACCESS_TOKEN or run: wb auth set-token <token>",
+                        "No API token found. Run `wb auth set-token` (prompts for the "
+                        "token, keeping it out of shell history) or set "
+                        "WEALTHBOX_ACCESS_TOKEN.",
                         ExitCode.AUTH_ERROR,
                         use_json=use_json,
                     )
@@ -91,6 +94,25 @@ def pass_client(write: bool = False) -> Callable:
 
         return wrapper
     return decorator
+
+
+def parse_set_fields(set_fields: tuple[str, ...] | list[str]) -> dict[str, str]:
+    """Parse repeated ``--set FIELD=VALUE`` options into a dict.
+
+    Values stay strings. A missing ``=`` or empty field name is rejected:
+    ``--set first_name`` used to silently send ``first_name: ""`` and blank
+    the field on the record.
+    """
+    data: dict[str, str] = {}
+    for field_val in set_fields:
+        key, sep, value = field_val.partition("=")
+        key = key.strip()
+        if not sep or not key:
+            raise click.BadParameter(
+                f"expected FIELD=VALUE, got {field_val!r}", param_hint="--set"
+            )
+        data[key] = value
+    return data
 
 
 def output_options(f: Callable) -> Callable:

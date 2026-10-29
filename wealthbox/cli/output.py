@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+import re
 import sys
 from typing import Any
 
@@ -20,6 +22,20 @@ def _filter_fields(data: dict, fields: list[str]) -> dict:
     return {k: v for k, v in data.items() if k in fields}
 
 
+# C0 controls except \t and \n, DEL, and C1 controls. ESC (\x1b) is in
+# here, so API-sourced text can't smuggle CSI/OSC sequences (cursor moves,
+# title rewrites, OSC-8 hyperlinks) onto the user's terminal.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+# Leading characters that make spreadsheet apps treat a cell as a formula
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def sanitize_text(text: str) -> str:
+    """Strip terminal control characters (keeps newlines and tabs)."""
+    return _CONTROL_CHARS.sub("", text)
+
+
 def _flatten_value(value: Any) -> str:
     """Flatten a value to a string for table/CSV display."""
     if value is None:
@@ -27,8 +43,20 @@ def _flatten_value(value: Any) -> str:
     if isinstance(value, bool):
         return str(value).lower()
     if isinstance(value, (list, dict)):
-        return json.dumps(value, default=str)
-    return str(value)
+        return sanitize_text(json.dumps(value, default=str))
+    return sanitize_text(str(value))
+
+
+def _csv_cell(value: Any) -> str:
+    """Flatten a value for CSV, neutralizing spreadsheet formula injection.
+
+    Per OWASP, string cells starting with = + - @ tab or CR get a leading
+    single quote. Real numbers (e.g. -5) are left alone.
+    """
+    text = _flatten_value(value)
+    if isinstance(value, str) and text.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def format_json(data: Any) -> str:
@@ -50,13 +78,16 @@ def format_table(records: list[dict], no_headers: bool = False) -> str:
     try:
         from rich.console import Console
         from rich.table import Table
+        from rich.text import Text
 
         table = Table(show_header=not no_headers)
         keys = list(records[0].keys())
         for key in keys:
-            table.add_column(key.upper())
+            table.add_column(Text(sanitize_text(str(key)).upper()))
         for record in records:
-            table.add_row(*[_flatten_value(record.get(k)) for k in keys])
+            # Text() cells are never parsed as console markup, so API data
+            # like "[link=...]" or "[/]" can't style, link, or crash output
+            table.add_row(*[Text(_flatten_value(record.get(k))) for k in keys])
 
         console = Console(file=io.StringIO(), force_terminal=True)
         console.print(table)
@@ -95,7 +126,7 @@ def format_csv(records: list[dict], no_headers: bool = False) -> str:
     if not no_headers:
         writer.writeheader()
     for record in records:
-        writer.writerow({k: _flatten_value(record.get(k)) for k in keys})
+        writer.writerow({k: _csv_cell(record.get(k)) for k in keys})
     return buf.getvalue().rstrip()
 
 
@@ -165,12 +196,37 @@ def output(
     _write_output(result, output_file)
 
 
+def write_private_file(path: str, text: str) -> None:
+    """Write text to path with owner-only (0600) permissions.
+
+    Writes to a temp file in the same directory and renames it into place,
+    so a crash can't leave a truncated file and the content is never
+    readable by other users, regardless of umask.
+    """
+    if os.path.exists(path) and not os.path.isfile(path):
+        # Device/FIFO targets like /dev/stdout can't be renamed over
+        with open(path, "w") as f:
+            f.write(text)
+        return
+    directory = os.path.dirname(os.path.abspath(path))
+    tmp_path = os.path.join(directory, f".{os.path.basename(path)}.{os.getpid()}.tmp")
+    fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+    except BaseException:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
 def _write_output(text: str, output_file: str | None) -> None:
     """Write output to file or stdout."""
     if output_file:
-        with open(output_file, "w") as f:
-            f.write(text)
-            if not text.endswith("\n"):
-                f.write("\n")
+        if os.path.isfile(output_file):
+            click.echo(f"Warning: overwriting existing file {output_file}", err=True)
+        write_private_file(output_file, text if text.endswith("\n") else text + "\n")
     else:
         click.echo(text)

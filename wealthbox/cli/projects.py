@@ -6,7 +6,7 @@ from typing import Any
 
 import click
 
-from .common import handle_output, output_options, pass_client
+from .common import handle_output, output_options, parse_set_fields, pass_client
 
 
 @click.group()
@@ -22,9 +22,8 @@ def projects() -> None:
 def list_projects(client, limit: int | None, **kwargs) -> None:
     """List projects."""
     ctx = click.get_current_context()
-    data = client.get_projects()
-    if limit:
-        data = data[:limit]
+    # api_request directly so --limit stops paginating early
+    data = client.api_request("projects", max_results=limit)
     handle_output(ctx, data, **kwargs)
 
 
@@ -98,9 +97,7 @@ def update_project(
         data["name"] = name
     if description:
         data["description"] = description
-    for fv in set_fields:
-        key, _, value = fv.partition("=")
-        data[key] = value
+    data.update(parse_set_fields(set_fields))
 
     result = client.update_project(project_id, data)
     handle_output(ctx, result, **kwargs)

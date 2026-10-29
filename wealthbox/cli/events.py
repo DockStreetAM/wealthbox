@@ -6,7 +6,7 @@ from typing import Any
 
 import click
 
-from .common import handle_output, output_options, pass_client
+from .common import handle_output, output_options, parse_set_fields, pass_client
 
 
 @click.group()
@@ -23,9 +23,12 @@ def events() -> None:
 def list_events(client, resource_id: int | None, limit: int | None, **kwargs) -> None:
     """List events with optional filters."""
     ctx = click.get_current_context()
-    data = client.get_events(resource_id=resource_id)
-    if limit:
-        data = data[:limit]
+    # Same params as client.get_events, via api_request so --limit stops
+    # paginating early instead of fetching everything then slicing
+    params: dict[str, Any] = {"resource_type": "contact"}
+    if resource_id is not None:
+        params["resource_id"] = resource_id
+    data = client.api_request("events", params=params, max_results=limit)
     handle_output(ctx, data, **kwargs)
 
 
@@ -120,9 +123,7 @@ def update_event(
         data["ends_at"] = ends_at
     if location is not None:
         data["location"] = location
-    for fv in set_fields:
-        key, _, value = fv.partition("=")
-        data[key] = value
+    data.update(parse_set_fields(set_fields))
 
     result = client.update_event(event_id, data)
     handle_output(ctx, result, **kwargs)

@@ -7,7 +7,8 @@ import click
 from .common import handle_output, output_options, pass_client
 from .config import load_token, save_token
 from .constants import ExitCode
-from .errors import die
+from .errors import api_status, die
+from .output import sanitize_text
 
 
 @click.group()
@@ -18,14 +19,36 @@ def auth() -> None:
 
 @auth.command("set-token")
 @click.argument("token", required=False)
-def set_token(token: str | None) -> None:
+@click.pass_context
+def set_token(ctx: click.Context, token: str | None) -> None:
     """Save an API token to ~/.config/wealthbox/credentials.json.
 
-    Omit the argument to be prompted for the token interactively,
-    which keeps it out of shell history.
+    Run with no argument to be prompted (input hidden) — recommended.
+    Use "-" to read the token from stdin. Passing the token as an argument
+    still works but leaves it in shell history and the process list.
+
+    Blocked under --readonly.
     """
+    obj = ctx.obj or {}
+    if obj.get("readonly"):
+        die(
+            "READONLY_MODE",
+            "auth set-token is blocked in --readonly mode",
+            ExitCode.READONLY_BLOCKED,
+            use_json=obj.get("json", False),
+        )
     if token is None:
         token = click.prompt("API token", hide_input=True)
+    elif token == "-":
+        token = click.get_text_stream("stdin").read().strip()
+    else:
+        click.echo(
+            "Warning: a token passed as an argument is saved in shell history. "
+            "Prefer `wb auth set-token` with no argument.",
+            err=True,
+        )
+    if not token:
+        die("VALIDATION_ERROR", "Empty token", ExitCode.VALIDATION_ERROR, use_json=obj.get("json", False))
     path = save_token(token)
     click.echo(f"Token saved to {path}")
 
@@ -43,11 +66,19 @@ def whoami(client, **kwargs) -> None:
 @auth.command("test")
 @pass_client(write=False)
 def test(client) -> None:
-    """Test API authentication."""
+    """Test API authentication.
+
+    Reports an authentication failure only on HTTP 401/403; network and
+    server errors exit with their own codes so you don't rotate a good token.
+    """
+    from wealthbox import WealthBoxAPIError
+
     try:
         data = client.api_request("me")
-        user = data.get("current_user", {})
-        name = user.get("name", "Unknown")
-        click.echo(f"Authenticated as: {name}")
-    except Exception:
-        die("AUTH_FAILED", "Authentication failed. Check your token.", ExitCode.AUTH_ERROR)
+    except WealthBoxAPIError as exc:
+        if api_status(exc) in (401, 403):
+            die("AUTH_FAILED", "Authentication failed. Check your token.", ExitCode.AUTH_ERROR)
+        raise
+    user = data.get("current_user", {})
+    name = sanitize_text(str(user.get("name", "Unknown")))
+    click.echo(f"Authenticated as: {name}")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from json import JSONDecodeError
 from typing import Any, Iterable
+from urllib.parse import quote, urlsplit
 import time
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,10 +23,20 @@ class WealthBoxError(Exception):
 
 
 class WealthBoxAPIError(WealthBoxError):
-    """Error returned by the WealthBox API."""
-    def __init__(self, message: str, response: dict[str, Any] | None = None) -> None:
+    """Error returned by the WealthBox API.
+
+    The message (and ``response``) echo the API's error body, which may
+    contain client PII — treat exception text as sensitive in logs.
+    """
+    def __init__(
+        self,
+        message: str,
+        response: dict[str, Any] | None = None,
+        status_code: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.response = response
+        self.status_code = status_code
 
 
 class WealthBoxResponseError(WealthBoxError):
@@ -33,6 +44,14 @@ class WealthBoxResponseError(WealthBoxError):
     def __init__(self, message: str, response_text: str | None = None) -> None:
         super().__init__(message)
         self.response_text = response_text
+
+
+class WealthBoxConnectionError(WealthBoxError):
+    """Network failure (connection error or timeout) after retries.
+
+    The underlying ``requests`` exception is chained as ``__cause__``.
+    """
+    pass
 
 
 class WealthBoxRateLimitError(WealthBoxError):
@@ -52,11 +71,17 @@ def filter_by_date(
     since_date: str,
     date_fields: tuple[str, ...] = ("created_at", "updated_at"),
 ) -> list[dict[str, Any]]:
-    """Keep items where any date_field >= since_date (ISO string comparison)."""
+    """Keep items where any date_field >= since_date (ISO string comparison).
+
+    Fields that are missing or null never match.
+    """
     return [
         item
         for item in items
-        if any(item.get(f, "") >= since_date for f in date_fields)
+        if any(
+            isinstance(item.get(f), str) and item[f] >= since_date
+            for f in date_fields
+        )
     ]
 
 
@@ -76,7 +101,9 @@ def filter_by_tag(
     ]
 
 
-def normalize_tags(tags: Iterable[str | dict[str, Any]]) -> list[str]:
+def normalize_tags(
+    tags: Iterable[str | dict[str, Any]] | str | dict[str, Any] | None,
+) -> list[str] | None:
     """Normalize tags to the request shape the API accepts on writes.
 
     WealthBox write bodies want tags as an array of name strings
@@ -84,8 +111,24 @@ def normalize_tags(tags: Iterable[str | dict[str, Any]]) -> list[str]:
     (``[{"id": 1, "name": "a"}]``). Sending the object shape in a write
     body fails with HTTP 400. Accept either shape and emit the request
     shape, so records read from the API can be written back unchanged.
+
+    A bare string or single tag dict is treated as one tag (iterating it
+    would otherwise write one tag per character / key). ``None`` is
+    returned unchanged.
     """
-    return [t["name"] if isinstance(t, dict) else t for t in tags]
+    if tags is None:
+        return None
+    if isinstance(tags, (str, dict)):
+        tags = [tags]
+    result: list[str] = []
+    for t in tags:
+        if isinstance(t, dict):
+            if not t.get("name"):
+                raise ValueError(f"Tag object has no 'name': {t!r}")
+            result.append(t["name"])
+        else:
+            result.append(t)
+    return result
 
 
 def sort_and_limit(
@@ -94,12 +137,17 @@ def sort_and_limit(
     limit: int | None = None,
     key: str = "created_at",
 ) -> list[dict[str, Any]]:
-    """Sort items by key and optionally cap at limit results."""
+    """Sort items by key and optionally cap at limit results.
+
+    Items whose key is missing or null sort last in either order.
+    """
+    present = [item for item in items if item.get(key) is not None]
+    missing = [item for item in items if item.get(key) is None]
     result = sorted(
-        items,
-        key=lambda item: item.get(key, ""),
+        present,
+        key=lambda item: item[key],
         reverse=(order == "desc"),
-    )
+    ) + missing
     if limit is not None:
         return result[:limit]
     return result
@@ -138,21 +186,47 @@ class WealthBox:
             # back as a 5xx would be replayed and create a duplicate record.
             allowed_methods=["GET", "PUT", "DELETE"],
             raise_on_status=False,
+            # Don't let a server-supplied Retry-After on a 503 stall a call
+            # for hours (urllib3 honors up to 6h, or uncapped on 1.x); use
+            # bounded exponential backoff instead.
+            respect_retry_after_header=False,
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
 
         self._session = requests.Session()
         self._session.mount("https://", adapter)
-        self._session.mount("http://", adapter)
         self._session.headers.update({'ACCESS_TOKEN': self.token})
 
     @staticmethod
+    def _id(value: Any, name: str = "id") -> str:
+        """Validate a resource id before interpolating it into a URL path.
+
+        Accepts positive ints and ASCII digit-only strings; anything else
+        (bools, negatives, 0, ``"5/../tasks/9"``, ``"5?x=1"``) raises
+        ``ValueError`` so a malformed id can't address a different resource.
+        """
+        if isinstance(value, bool):
+            raise ValueError(f"Invalid {name}: {value!r}")
+        if isinstance(value, int):
+            if value <= 0:
+                raise ValueError(f"Invalid {name}: {value!r}")
+            return str(value)
+        if isinstance(value, str) and value.isascii() and value.isdigit():
+            if int(value) <= 0:
+                raise ValueError(f"Invalid {name}: {value!r}")
+            return value
+        raise ValueError(f"Invalid {name}: {value!r} (expected a positive integer id)")
+
+    @staticmethod
     def _retry_after_seconds(response: requests.Response) -> int | None:
-        """Parse the Retry-After header of a 429, tolerating non-integer values."""
+        """Parse the Retry-After header of a 429, tolerating non-integer values.
+
+        Negative values clamp to 0; non-numeric values (e.g. an HTTP-date)
+        return None so the caller falls back to its default.
+        """
         retry_after = response.headers.get('Retry-After')
         try:
-            # Retry-After may legally be an HTTP-date; treat that as unknown
-            return int(retry_after) if retry_after else None
+            return max(0, int(retry_after)) if retry_after else None
         except ValueError:
             return None
 
@@ -161,13 +235,33 @@ class WealthBox:
 
         Raises WealthBoxRateLimitError once retries are exhausted or the
         server asks for a wait longer than rate_limit_max_wait.
+        Redirects are not followed (they would carry the ACCESS_TOKEN header
+        to wherever they point); a 3xx raises WealthBoxAPIError. Connection
+        errors and timeouts raise WealthBoxConnectionError.
         """
         kwargs.setdefault('timeout', self.timeout)
+        kwargs.setdefault('allow_redirects', False)
+        path = urlsplit(url).path
         for attempt in range(self._rate_limit_retries + 1):
-            res = self._session.request(method, url, **kwargs)
+            try:
+                res = self._session.request(method, url, **kwargs)
+            except (requests.ConnectionError, requests.Timeout) as e:
+                # Path only: the full URL's query string can carry filter PII
+                raise WealthBoxConnectionError(
+                    f"WealthBox {method} {path} failed: {type(e).__name__}"
+                ) from e
+            if 300 <= res.status_code < 400:
+                raise WealthBoxAPIError(
+                    f"WealthBox {method} {path} returned unexpected redirect "
+                    f"({res.status_code}) to {res.headers.get('Location')!r}; "
+                    "not followed",
+                    status_code=res.status_code,
+                )
             if res.status_code != 429:
                 return res
-            wait_time = self._retry_after_seconds(res) or 60  # default 60s
+            parsed = self._retry_after_seconds(res)
+            # Default 60s when absent/unparseable; at least 1s otherwise
+            wait_time = max(1, parsed) if parsed is not None else 60
             if attempt < self._rate_limit_retries and wait_time <= self._rate_limit_max_wait:
                 time.sleep(wait_time)
             else:
@@ -199,6 +293,7 @@ class WealthBox:
         raise WealthBoxAPIError(
             f"WealthBox {method} /{endpoint} failed ({res.status_code}): {body}",
             response=response,
+            status_code=res.status_code,
         )
 
     def _json_or_raise(
@@ -245,6 +340,23 @@ class WealthBox:
             for k, v in params.items()
         }
 
+    @staticmethod
+    def _total_pages(res_json: dict[str, Any], endpoint: str) -> int:
+        """Read meta.total_pages, raising WealthBoxResponseError if malformed.
+
+        Every paginated endpoint returns it (the previous code indexed it
+        unconditionally), so its absence means a malformed response, not a
+        single page.
+        """
+        meta = res_json.get('meta')
+        total_pages = meta.get('total_pages') if isinstance(meta, dict) else None
+        if isinstance(total_pages, bool) or not isinstance(total_pages, int):
+            raise WealthBoxResponseError(
+                f"WealthBox GET /{endpoint}: missing or invalid "
+                f"meta.total_pages ({total_pages!r})"
+            )
+        return total_pages
+
     def _fetch_page(
         self,
         url: str,
@@ -261,7 +373,7 @@ class WealthBox:
         page_params = {**params, 'page': page}
         res = self._request('GET', url, params=page_params)
         res_json = self._json_or_raise(res, 'GET', endpoint)
-        total_pages = res_json['meta']['total_pages']
+        total_pages = self._total_pages(res_json, endpoint)
         if key not in res_json:
             raise WealthBoxAPIError(
                 f"Expected key '{key}' not found in response",
@@ -286,6 +398,12 @@ class WealthBox:
         ``max_results`` stops fetching once that many records are collected
         (only the pages needed are requested), then truncates to the limit.
 
+        Paging is by offset, so records created/deleted mid-pull can shift
+        across page boundaries; multi-page results are de-duplicated by
+        ``id`` (first occurrence kept, records without an id kept). A
+        record can still be missed in that window. If any page fails, pages
+        not yet started are cancelled and the error is raised.
+
         See :meth:`_bracketize` for how list-valued filter params are encoded.
         """
         url = self.base_url + endpoint
@@ -306,7 +424,7 @@ class WealthBox:
                 f"Expected key '{key}' not found in response", response=res_json
             )
 
-        total_pages = res_json['meta']['total_pages']
+        total_pages = self._total_pages(res_json, endpoint)
         results: list[dict[str, Any]] = list(res_json[key])
 
         # Decide how many more pages we actually need
@@ -329,11 +447,28 @@ class WealthBox:
                 pool.submit(self._fetch_page, url, params, p, endpoint, key): p
                 for p in remaining
             }
-            for fut in futures:
-                by_page[futures[fut]] = fut.result()[0]
+            try:
+                for fut in futures:
+                    by_page[futures[fut]] = fut.result()[0]
+            except BaseException:
+                # Don't issue the rest of the page requests after a failure
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
 
         for p in remaining:
             results.extend(by_page[p])
+
+        # Offset paging can repeat a record that shifted pages mid-pull
+        seen: set[Any] = set()
+        deduped: list[dict[str, Any]] = []
+        for r in results:
+            rid = r.get('id') if isinstance(r, dict) else None
+            if rid is not None:
+                if rid in seen:
+                    continue
+                seen.add(rid)
+            deduped.append(r)
+        results = deduped
 
         return results[:max_results] if max_results is not None else results
 
@@ -353,8 +488,14 @@ class WealthBox:
         res_json = self._json_or_raise(
             self._request('GET', url, params=req_params), 'GET', endpoint
         )
-        meta = res_json.get('meta', {})
-        return meta.get('total_count', 0)
+        meta = res_json.get('meta') if isinstance(res_json, dict) else None
+        total = meta.get('total_count') if isinstance(meta, dict) else None
+        if isinstance(total, bool) or not isinstance(total, int):
+            raise WealthBoxResponseError(
+                f"WealthBox GET /{endpoint}: missing or invalid "
+                f"meta.total_count ({total!r})"
+            )
+        return total
 
     def api_put(self, endpoint: str, data: dict[str, Any]) -> dict[str, Any]:
         data = self._normalize_write_data(data)
@@ -373,7 +514,8 @@ class WealthBox:
             return True
         self._raise_for_status(res, 'DELETE', endpoint)
         raise WealthBoxAPIError(
-            f"WealthBox DELETE /{endpoint} returned unexpected status {res.status_code}"
+            f"WealthBox DELETE /{endpoint} returned unexpected status {res.status_code}",
+            status_code=res.status_code,
         )
 
     def api_get_single(
@@ -427,7 +569,7 @@ class WealthBox:
 
     def get_contact(self, contact_id: int) -> dict[str, Any]:
         """Get a single contact by ID."""
-        return self.api_get_single(f'contacts/{contact_id}')
+        return self.api_get_single(f'contacts/{self._id(contact_id)}')
 
     def create_contact(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new contact.
@@ -450,7 +592,7 @@ class WealthBox:
         Returns:
             True if deletion was successful.
         """
-        return self.api_delete(f'contacts/{contact_id}')
+        return self.api_delete(f'contacts/{self._id(contact_id)}')
 
     def get_tasks(
         self,
@@ -484,15 +626,15 @@ class WealthBox:
 
     def get_task(self, task_id: int) -> dict[str, Any]:
         """Get a single task by ID."""
-        return self.api_get_single(f'tasks/{task_id}')
+        return self.api_get_single(f'tasks/{self._id(task_id)}')
 
     def update_task(self, task_id: int, data: dict[str, Any]) -> dict[str, Any]:
         """Update a task by ID."""
-        return self.api_put(f'tasks/{task_id}', data)
+        return self.api_put(f'tasks/{self._id(task_id)}', data)
 
     def delete_task(self, task_id: int) -> bool:
         """Delete a task by ID."""
-        return self.api_delete(f'tasks/{task_id}')
+        return self.api_delete(f'tasks/{self._id(task_id)}')
 
     def get_workflows(
         self,
@@ -541,7 +683,7 @@ class WealthBox:
 
     def get_workflow(self, workflow_id: int) -> dict[str, Any]:
         """Get a single workflow by ID."""
-        return self.api_get_single(f'workflows/{workflow_id}')
+        return self.api_get_single(f'workflows/{self._id(workflow_id)}')
 
     def create_workflow(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new workflow.
@@ -553,7 +695,7 @@ class WealthBox:
 
     def delete_workflow(self, workflow_id: int) -> bool:
         """Delete a workflow by ID."""
-        return self.api_delete(f'workflows/{workflow_id}')
+        return self.api_delete(f'workflows/{self._id(workflow_id)}')
 
     def get_workflow_templates(
         self,
@@ -582,7 +724,7 @@ class WealthBox:
         data: dict[str, Any] = {"complete": True}
         if workflow_outcome_id is not None:
             data["workflow_outcome_id"] = workflow_outcome_id
-        return self.api_put(f'workflows/{workflow_id}/steps/{step_id}', data)
+        return self.api_put(f'workflows/{self._id(workflow_id)}/steps/{self._id(step_id, "step_id")}', data)
 
     def revert_workflow_step(
         self,
@@ -594,7 +736,7 @@ class WealthBox:
         ``PUT /workflows/{workflow_id}/steps/{step_id}`` with ``{"revert": true}``
         (verified live).
         """
-        return self.api_put(f'workflows/{workflow_id}/steps/{step_id}', {"revert": True})
+        return self.api_put(f'workflows/{self._id(workflow_id)}/steps/{self._id(step_id, "step_id")}', {"revert": True})
 
     def get_events(
         self,
@@ -610,7 +752,7 @@ class WealthBox:
 
     def get_event(self, event_id: int) -> dict[str, Any]:
         """Get a single event by ID."""
-        return self.api_get_single(f'events/{event_id}')
+        return self.api_get_single(f'events/{self._id(event_id)}')
 
     def create_event(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new event.
@@ -622,11 +764,11 @@ class WealthBox:
 
     def update_event(self, event_id: int, data: dict[str, Any]) -> dict[str, Any]:
         """Update an event by ID."""
-        return self.api_put(f'events/{event_id}', data)
+        return self.api_put(f'events/{self._id(event_id)}', data)
 
     def delete_event(self, event_id: int) -> bool:
         """Delete an event by ID."""
-        return self.api_delete(f'events/{event_id}')
+        return self.api_delete(f'events/{self._id(event_id)}')
 
     def get_opportunities(
         self,
@@ -649,7 +791,7 @@ class WealthBox:
 
     def get_opportunity(self, opportunity_id: int) -> dict[str, Any]:
         """Get a single opportunity by ID."""
-        return self.api_get_single(f'opportunities/{opportunity_id}')
+        return self.api_get_single(f'opportunities/{self._id(opportunity_id)}')
 
     def create_opportunity(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new opportunity.
@@ -665,11 +807,11 @@ class WealthBox:
         data: dict[str, Any]
     ) -> dict[str, Any]:
         """Update an opportunity by ID."""
-        return self.api_put(f'opportunities/{opportunity_id}', data)
+        return self.api_put(f'opportunities/{self._id(opportunity_id)}', data)
 
     def delete_opportunity(self, opportunity_id: int) -> bool:
         """Delete an opportunity by ID."""
-        return self.api_delete(f'opportunities/{opportunity_id}')
+        return self.api_delete(f'opportunities/{self._id(opportunity_id)}')
 
     def get_notes(
         self,
@@ -710,7 +852,7 @@ class WealthBox:
 
     def get_note(self, note_id: int) -> dict[str, Any]:
         """Get a single note by ID."""
-        return self.api_get_single(f'notes/{note_id}')
+        return self.api_get_single(f'notes/{self._id(note_id)}')
 
     def create_note(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new note.
@@ -725,7 +867,7 @@ class WealthBox:
 
     def update_note(self, note_id: int, data: dict[str, Any]) -> dict[str, Any]:
         """Update a note by ID."""
-        return self.api_put(f'notes/{note_id}', data)
+        return self.api_put(f'notes/{self._id(note_id)}', data)
 
     def search_notes_by_tag(
         self,
@@ -800,7 +942,7 @@ class WealthBox:
 
     def get_project(self, project_id: int) -> dict[str, Any]:
         """Get a single project by ID."""
-        return self.api_get_single(f'projects/{project_id}')
+        return self.api_get_single(f'projects/{self._id(project_id)}')
 
     def create_project(self, data: dict[str, Any]) -> dict[str, Any]:
         """Create a new project.
@@ -812,14 +954,14 @@ class WealthBox:
 
     def update_project(self, project_id: int, data: dict[str, Any]) -> dict[str, Any]:
         """Update a project by ID."""
-        return self.api_put(f'projects/{project_id}', data)
+        return self.api_put(f'projects/{self._id(project_id)}', data)
 
     def delete_project(self, project_id: int) -> bool:
         """Delete a project by ID."""
-        return self.api_delete(f'projects/{project_id}')
+        return self.api_delete(f'projects/{self._id(project_id)}')
 
     def get_categories(self, cat_type: str) -> list[dict[str, Any]]:
-        return self.api_request(f'categories/{cat_type}')
+        return self.api_request(f"categories/{quote(cat_type, safe='')}")
 
     # Convenience wrappers over get_categories for the documented subtypes.
     # These return reference lists of {id, name, ...} used to resolve the
@@ -860,9 +1002,9 @@ class WealthBox:
         resource_id: int,
         resource_type: str = 'status_update'
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {}
-        if resource_id:
-            params['resource_id'] = resource_id
+        # resource_id is required: a falsy id used to drop the filter and
+        # pull every comment in the workspace.
+        params: dict[str, Any] = {'resource_id': self._id(resource_id, "resource_id")}
         if resource_type:
             params['resource_type'] = resource_type
         return self.api_request('comments', params=params)
@@ -927,7 +1069,7 @@ class WealthBox:
             household_id: ID of the household contact.
             contact_id: ID of the contact to remove.
         """
-        return self.api_delete(f'household_members/{household_id}/{contact_id}')
+        return self.api_delete(f'household_members/{self._id(household_id)}/{self._id(contact_id)}')
 
     def get_household_members(
         self, household_contact: dict[str, Any]
@@ -992,11 +1134,20 @@ class WealthBox:
             params = {'document_type': document_type}
         return self.api_request('categories/custom_fields', params=params)
 
-    def _custom_field_defs(self, document_type: str) -> list[dict[str, Any]]:
+    def _custom_field_defs(
+        self, document_type: str, refresh: bool = False
+    ) -> list[dict[str, Any]]:
         """Return (and cache) the custom field definitions for a document type."""
-        if document_type not in self._custom_field_cache:
+        if refresh or document_type not in self._custom_field_cache:
             self._custom_field_cache[document_type] = self.get_custom_fields(document_type)
         return self._custom_field_cache[document_type]
+
+    def clear_custom_field_cache(self, document_type: str | None = None) -> None:
+        """Drop cached custom field definitions (one document type, or all)."""
+        if document_type is None:
+            self._custom_field_cache.clear()
+        else:
+            self._custom_field_cache.pop(document_type, None)
 
     def build_custom_fields_payload(
         self, document_type: str, values: dict[str, Any]
@@ -1010,9 +1161,16 @@ class WealthBox:
         an unknown option (listing valid choices). Per the WB docs the value is
         the option label for selects; the exact wire format for selects was not
         verified against a live write.
+
+        Definitions are cached per document type; an unknown name triggers
+        one refetch (the field may have been added since) before raising.
         """
+        was_cached = document_type in self._custom_field_cache
         defs = self._custom_field_defs(document_type)
         by_name = {d["name"].lower(): d for d in defs if d.get("name")}
+        if was_cached and any(name.lower() not in by_name for name in values):
+            defs = self._custom_field_defs(document_type, refresh=True)
+            by_name = {d["name"].lower(): d for d in defs if d.get("name")}
         payload: list[dict[str, Any]] = []
         for name, value in values.items():
             d = by_name.get(name.lower())
@@ -1059,7 +1217,7 @@ class WealthBox:
             data["custom_fields"] = self.build_custom_fields_payload(
                 "Contact", custom_fields
             )
-        return self.api_put(f'contacts/{contact_id}', data)
+        return self.api_put(f'contacts/{self._id(contact_id)}', data)
 
     def get_notes_with_comments(self, contact_id: int) -> list[dict[str, Any]]:
         notes = self.get_notes(contact_id)
@@ -1148,8 +1306,8 @@ class WealthBox:
         category: int | None = None,
         custom_fields: dict[str, Any] | list[Any] | None = None
     ) -> dict[str, Any]:
-        """custom_fields is a dict for setting any custom fields
-           dict([Name of Field] : [Value])
+        """custom_fields is sent as-is; the API expects ``[{id, value}]``
+        (see :meth:`build_custom_fields_payload`).
         """
         if custom_fields is None:
             custom_fields = []
@@ -1188,29 +1346,44 @@ class WealthBox:
     ) -> dict[str, Any]:
         """
         A more user friendly version to create a task
-        kwargs can be used to capture any custom fields
+        kwargs set Task custom fields by name (``_`` → space, matched
+        case-insensitively); an unknown name raises ValueError.
         due: string or datetime. If string, should be WB later type "2 days later"
-        linked_to: array of ids or a array of dicts
-        assigned_to: string name of user or team
+        linked_to: id(s) or dict(s) with ``id`` and optional ``type``
+            (default ``"Contact"``)
+        assigned_to: user or team name — an exact full name wins, else a
+            unique first/last-name match; ambiguous names raise ValueError
         """
-        # Get all users and teams
-        user_team_map: dict[str, int] = {}
-        for user in self.get_users():
-            # Insert full name and also first name and last
-            user_team_map[user['name']] = user['id']
-            user_team_map[user['name'].split(' ')[0]] = user['id']
-            user_team_map[user['name'].split(' ')[-1]] = user['id']
+        users = self.get_users()
         teams = self.get_teams()
-        team_names = {team['name'] for team in teams}
-        for team in teams:
-            user_team_map[team['name']] = team['id']
 
-        assigned_to_id = user_team_map.get(assigned_to) if assigned_to else None
-        if assigned_to and assigned_to_id is None:
-            # Without this, an unknown name would silently assign the task
-            # to the API token's owner (create_task_detailed's fallback)
-            raise ValueError(f"No user or team named {assigned_to!r} found")
-        is_team = assigned_to in team_names if assigned_to else False
+        assigned_to_id: int | None = None
+        is_team = False
+        if assigned_to:
+            # (is_team, id, name) candidates; exact full name first
+            candidates = (
+                [(False, u['id'], u['name']) for u in users if u['name'] == assigned_to]
+                + [(True, t['id'], t['name']) for t in teams if t['name'] == assigned_to]
+            )
+            if not candidates:
+                candidates = [
+                    (False, u['id'], u['name']) for u in users
+                    if assigned_to in (u['name'].split(' ')[0], u['name'].split(' ')[-1])
+                ]
+            if not candidates:
+                # Without this, an unknown name would silently assign the task
+                # to the API token's owner (create_task_detailed's fallback)
+                raise ValueError(f"No user or team named {assigned_to!r} found")
+            if len(candidates) > 1:
+                listed = ", ".join(
+                    f"{name} ({'team' if team else 'user'} {cid})"
+                    for team, cid, name in candidates
+                )
+                raise ValueError(
+                    f"Ambiguous assignee {assigned_to!r}; matches: {listed}. "
+                    "Use the full name."
+                )
+            is_team, assigned_to_id, _ = candidates[0]
 
         category_id: int | None
         if isinstance(category, str):
@@ -1236,22 +1409,19 @@ class WealthBox:
             if not isinstance(linked_to, list):
                 linked_to = [linked_to]
             if len(linked_to) > 0:
-                if isinstance(linked_to[0], dict):
-                    linked_to_list = [{'id': d['id'], 'type': 'Contact'} for d in linked_to]
-                else:
-                    linked_to_list = [{'id': contact_id, 'type': 'Contact'} for contact_id in linked_to]
+                linked_to_list = [
+                    {'id': d['id'], 'type': d.get('type') or 'Contact'}
+                    if isinstance(d, dict) else {'id': d, 'type': 'Contact'}
+                    for d in linked_to
+                ]
 
-        # Get the available custom fields for tasks
-        custom_fields = self.get_custom_fields('Task')
-        
-        cf: dict[str, Any] = {}
-        for k, v in kwargs.items():
-            # try to match kwargs to custom fields
-            # no vetting of values is done
-            # replace _ in k with space
-            name = k.replace('_', ' ')
-            if name in [f['name'] for f in custom_fields]:
-                cf[name] = v
+        # kwargs → Task custom fields, resolved to the API's [{id, value}]
+        # write shape; unknown names raise instead of being dropped
+        cf: list[dict[str, Any]] = []
+        if kwargs:
+            cf = self.build_custom_fields_payload(
+                'Task', {k.replace('_', ' '): v for k, v in kwargs.items()}
+            )
 
         if is_team:
             return self.create_task_detailed(

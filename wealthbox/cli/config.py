@@ -12,35 +12,48 @@ def get_credentials_path() -> Path:
     return Path.home() / ".config" / "wealthbox" / "credentials.json"
 
 
-def load_token() -> str | None:
+def get_config_env_path() -> Path:
+    """Path of the optional .env file in the config directory."""
+    return get_credentials_path().parent / ".env"
+
+
+def _token_from_env_file(env_path: Path) -> str | None:
+    """Read WEALTHBOX_ACCESS_TOKEN from a .env file, if present."""
+    if not env_path.is_file():
+        return None
+    try:
+        from dotenv import dotenv_values
+        return dotenv_values(env_path).get("WEALTHBOX_ACCESS_TOKEN") or None
+    except ImportError:
+        # Parse .env manually if python-dotenv not available
+        return _parse_env_file(env_path)
+
+
+def load_token(env_file: str | os.PathLike | None = None) -> str | None:
     """Load the WealthBox API token.
 
     Resolution order:
     1. WEALTHBOX_ACCESS_TOKEN environment variable
-    2. .env file in current working directory
-    3. ~/.config/wealthbox/credentials.json
+    2. An explicitly requested .env file (``wb --env-file PATH``)
+    3. ~/.config/wealthbox/credentials.json (written by ``wb auth set-token``)
+    4. ~/.config/wealthbox/.env
+
+    A .env in the current working directory is deliberately NOT read: a
+    cloned repo shipping its own .env could otherwise silently swap in a
+    different workspace's token. Pass ``--env-file .env`` to opt in.
     """
     # 1. Environment variable
     token = os.environ.get("WEALTHBOX_ACCESS_TOKEN")
     if token:
         return token
 
-    # 2. .env file in current directory
-    env_path = Path.cwd() / ".env"
-    if env_path.exists():
-        try:
-            from dotenv import dotenv_values
-            values = dotenv_values(env_path)
-            token = values.get("WEALTHBOX_ACCESS_TOKEN")
-            if token:
-                return token
-        except ImportError:
-            # Parse .env manually if python-dotenv not available
-            token = _parse_env_file(env_path)
-            if token:
-                return token
+    # 2. Explicit .env file
+    if env_file is not None:
+        token = _token_from_env_file(Path(env_file))
+        if token:
+            return token
 
-    # 3. Config file
+    # 3. Credentials file
     creds_path = get_credentials_path()
     if creds_path.exists():
         try:
@@ -51,7 +64,8 @@ def load_token() -> str | None:
         except (json.JSONDecodeError, OSError):
             pass
 
-    return None
+    # 4. .env in the config directory
+    return _token_from_env_file(get_config_env_path())
 
 
 def save_token(token: str) -> Path:

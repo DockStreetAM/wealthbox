@@ -6,7 +6,7 @@ from typing import Any
 
 import click
 
-from .common import handle_output, output_options, pass_client
+from .common import handle_output, output_options, parse_set_fields, pass_client
 
 
 @click.group()
@@ -140,8 +140,18 @@ def create_contact(
 @click.option("--first-name", type=str, default=None, help="First name")
 @click.option("--last-name", type=str, default=None, help="Last name")
 @click.option("--contact-type", type=str, default=None, help="Contact type")
-@click.option("--email", type=str, default=None, help="Email address")
-@click.option("--phone", type=str, default=None, help="Phone number")
+@click.option(
+    "--email", type=str, default=None,
+    help="Email address (Work). ADDS a new non-primary address; existing entries are kept "
+    "(verified live). To change or remove one, use --from-json with its id "
+    "(and \"destroy\": true to remove).",
+)
+@click.option(
+    "--phone", type=str, default=None,
+    help="Phone number (Mobile). ADDS a new non-primary number; existing entries are kept "
+    "(verified live). To change or remove one, use --from-json with its id "
+    "(and \"destroy\": true to remove).",
+)
 @click.option("--set", "set_fields", multiple=True, help="Set field value (FIELD=VALUE, repeatable)")
 @click.option("--from-json", "json_data", type=str, default=None, help="JSON data string or @file path")
 @output_options
@@ -181,9 +191,7 @@ def update_contact(
             data["email_addresses"] = [{"address": email, "kind": "Work"}]
         if phone:
             data["phone_numbers"] = [{"address": phone, "kind": "Mobile"}]
-        for field_val in set_fields:
-            key, _, value = field_val.partition("=")
-            data[key] = value
+        data.update(parse_set_fields(set_fields))
 
     result = client.update_contact(contact_id, data)
     handle_output(ctx, result, **kwargs)
@@ -204,14 +212,20 @@ def delete_contact(client, contact_id: int, confirm: bool) -> None:
 @click.option("--output", "-o", "output_file", type=str, default=None, help="Write to specific file path")
 @click.option("--stdout", is_flag=True, help="Print to terminal instead of writing file")
 @click.option("--workspace-id", type=int, default=None, help="Wealthbox workspace ID for generating deep links")
+@click.option("--force", is_flag=True, help="Overwrite the -o file if it already exists")
 @pass_client(write=False)
 def export_contact(
-    client, contact_id: int, output_file: str | None, stdout: bool, workspace_id: int | None
+    client,
+    contact_id: int,
+    output_file: str | None,
+    stdout: bool,
+    workspace_id: int | None,
+    force: bool,
 ) -> None:
     """Export a contact to markdown with full activity timeline.
 
     Exports the contact (and their household) to a QMD-compatible markdown
-    file with frontmatter metadata, contact info, and a unified activity
+    file (owner-only 0600 permissions) with frontmatter metadata, contact info, and a unified activity
     timeline including notes, tasks, events, workflows, and opportunities.
 
     If --workspace-id is provided, activity items will include clickable
@@ -224,14 +238,25 @@ def export_contact(
       wb contacts export 12345 -o client.md                 # Specific file
       wb contacts export 12345 --workspace-id 15708         # With deep links
     """
+    import os
     import re as re_mod
 
+    from .constants import ExitCode
+    from .errors import die
     from .export import _slugify, export_contact_to_markdown
+    from .output import sanitize_text, write_private_file
+
+    if output_file is not None and not stdout and not force and os.path.exists(output_file):
+        die(
+            "FILE_EXISTS",
+            f"{output_file} already exists; use --force to overwrite",
+            ExitCode.VALIDATION_ERROR,
+        )
 
     markdown = export_contact_to_markdown(client, contact_id, workspace_id=workspace_id)
 
     if stdout:
-        click.echo(markdown)
+        click.echo(sanitize_text(markdown))
     else:
         if output_file is None:
             # Auto-generate filename from frontmatter title
@@ -239,15 +264,14 @@ def export_contact(
             name = match.group(1) if match else f"contact-{contact_id}"
             output_file = f"{_slugify(name)}-{contact_id}.md"
 
-        with open(output_file, "w") as f:
-            f.write(markdown)
+        write_private_file(output_file, markdown)
         click.echo(f"Exported to {output_file}")
 
 
 @contacts.command("export-all")
 @click.option("--output-dir", "-o", type=str, default="./exports", help="Output directory for markdown files")
 @click.option("--contact-type", type=str, default=None, help="Filter by contact_type: Client, Prospect, etc.")
-@click.option("--dry-run", is_flag=True, help="Show what would be exported without actually exporting")
+@click.option("--dry-run", is_flag=True, help="Show what would be exported without actually exporting (global --dry-run also works)")
 @click.option("--incremental/--full", default=True, help="Only update changed files (default) or force full rebuild")
 @click.option("--comment-lookback-days", type=int, default=30, help="Days to look back for new comments on existing items")
 @click.option("--workspace-id", type=int, default=None, help="Wealthbox workspace ID for generating deep links")
@@ -269,7 +293,14 @@ def export_all_contacts(
 
     Uses caching to minimize API calls across all exports.
     Incremental mode (default) only re-exports contacts with changes
-    since the last export.
+    since the last export. If any contact fails, the last-export
+    timestamp is not advanced (so the next run retries it) and the
+    command exits non-zero.
+
+    Files are written owner-only (0600) in a 0700 directory. When a
+    contact's filename changes, its old file is removed; a --full export
+    (without --contact-type) also removes files of contacts no longer
+    exported.
 
     If --workspace-id is provided, activity items will include clickable
     links to view them directly in Wealthbox.
@@ -285,8 +316,10 @@ def export_all_contacts(
     """
     import os
     import re as re_mod
+    import sys
     from datetime import datetime, timezone
 
+    from .constants import ExitCode
     from .export import (
         ExportCache,
         ExportMetadata,
@@ -294,10 +327,15 @@ def export_all_contacts(
         export_contact_to_markdown,
         find_dirty_contacts,
     )
+    from .output import sanitize_text, write_private_file
 
-    # Create output directory if needed
+    # The global `wb --dry-run` must also keep export-all from writing
+    ctx_obj = click.get_current_context().obj or {}
+    dry_run = dry_run or bool(ctx_obj.get("dry_run"))
+
+    # Create output directory if needed (owner-only: exports hold client PII)
     if not dry_run:
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(output_dir, mode=0o700, exist_ok=True)
 
     # Build filter params
     params: dict[str, Any] = {}
@@ -311,6 +349,11 @@ def export_all_contacts(
     meta = ExportMetadata.load(output_dir)
     dirty_ids: set[int] | None = None
 
+    # Taken BEFORE change detection and fetching: anything modified while
+    # this run is in progress has updated_at > run_started, so the next
+    # incremental run still picks it up
+    run_started = datetime.now(timezone.utc)
+
     if incremental and meta.last_export is not None:
         click.echo(f"Last export: {meta.last_export.isoformat()}")
         click.echo("Detecting changes...")
@@ -321,7 +364,7 @@ def export_all_contacts(
         if dirty_ids is not None:
             click.echo(f"Found {len(dirty_ids)} dirty contact(s)")
         else:
-            click.echo("First export — exporting all contacts")
+            click.echo("Could not detect changes — exporting all contacts")
     elif not incremental:
         click.echo("Full export mode — exporting all contacts")
         dirty_ids = None
@@ -330,10 +373,26 @@ def export_all_contacts(
 
     # Track which contact IDs we've already exported (as household members)
     exported_ids: set[int] = set()
+    # Contacts whose file was written this run / that failed this run
+    written_ids: set[int] = set()
+    failed_ids: set[int] = set()
     stats = {
         "households": 0, "persons": 0, "trusts": 0, "organizations": 0,
         "skipped": 0, "skipped_clean": 0, "errors": 0, "updated": 0,
     }
+    removed_files: list[str] = []
+    real_output_dir = os.path.realpath(output_dir)
+
+    def _remove_tracked_file(filename: str) -> None:
+        """Remove a metadata-tracked export file, only if it's inside output_dir."""
+        if not filename or os.path.basename(filename) != filename:
+            return
+        path = os.path.join(output_dir, filename)
+        if os.path.dirname(os.path.realpath(path)) != real_output_dir:
+            return
+        if os.path.isfile(path):
+            os.remove(path)
+            removed_files.append(filename)
 
     def _is_dirty(contact_id: int, members: list[dict[str, Any]] | None = None) -> bool:
         """Check if a contact needs re-export."""
@@ -362,7 +421,8 @@ def export_all_contacts(
         Returns True if the contact was exported (or would be, in dry-run).
         """
         contact_id = contact["id"]
-        name = contact.get("name", f"contact-{contact_id}")
+        # API-sourced: strip control chars before printing to the terminal
+        name = sanitize_text(str(contact.get("name", f"contact-{contact_id}")))
         members = contact.get("members", [])
 
         if contact_id in exported_ids:
@@ -394,12 +454,17 @@ def export_all_contacts(
             filename = f"{_slugify(title)}-{contact_id}.md"
             filepath = os.path.join(output_dir, filename)
 
-            with open(filepath, "w") as f:
-                f.write(markdown)
+            write_private_file(filepath, markdown)
 
             click.echo(f"{progress}  [{phase}] {name} -> {filename}")
             exported_ids.add(contact_id)
+            written_ids.add(contact_id)
             stats["updated"] += 1
+
+            # Renamed contact: drop the file written under the old name
+            old_filename = meta.contact_files.get(contact_id)
+            if old_filename and old_filename != filename:
+                _remove_tracked_file(old_filename)
 
             # Track in metadata
             meta.contact_files[contact_id] = filename
@@ -408,8 +473,10 @@ def export_all_contacts(
             return True
 
         except Exception as e:
-            click.echo(f"{progress}  [{phase}] ERROR exporting {name}: {e}", err=True)
+            msg = sanitize_text(str(e))
+            click.echo(f"{progress}  [{phase}] ERROR exporting {name}: {msg}", err=True)
             stats["errors"] += 1
+            failed_ids.add(contact_id)
             return False
 
     # Phase 1: Households
@@ -452,9 +519,20 @@ def export_all_contacts(
         if do_export(org, "Org", progress=f"[{i}/{len(orgs)}]"):
             stats["organizations"] += 1
 
+    # Full export: drop files for contacts that no longer get their own
+    # file (deleted, or now covered by a household). Skipped when filtered
+    # by --contact-type (other types' files are still valid) or when any
+    # contact failed (its old file is better than none).
+    if not dry_run and not incremental and not contact_type and not stats["errors"]:
+        for stale_id in [cid for cid in meta.contact_files if cid not in written_ids]:
+            _remove_tracked_file(meta.contact_files.pop(stale_id))
+
     # Save metadata
     if not dry_run:
-        meta.last_export = datetime.now(timezone.utc)
+        # Advance last_export only on a clean run, so contacts that failed
+        # are retried by the next incremental run
+        if not stats["errors"]:
+            meta.last_export = run_started
         meta.save(output_dir)
 
     # Summary
@@ -466,7 +544,16 @@ def export_all_contacts(
     click.echo(f"Skipped (dup): {stats['skipped']}")
     if stats["skipped_clean"]:
         click.echo(f"Skipped (clean): {stats['skipped_clean']}")
-    if stats["errors"]:
-        click.echo(f"Errors:        {stats['errors']}")
     click.echo(f"Files updated: {stats['updated']}")
+    if removed_files:
+        click.echo(f"Removed stale files: {len(removed_files)}")
+        for filename in removed_files:
+            click.echo(f"  - {filename}")
     click.echo(f"Total contacts: {len(exported_ids)}")
+    if stats["errors"]:
+        click.echo(
+            f"Errors:        {stats['errors']} (last-export time not advanced; "
+            f"failed IDs: {', '.join(str(c) for c in sorted(failed_ids))})",
+            err=True,
+        )
+        sys.exit(int(ExitCode.GENERAL_ERROR))

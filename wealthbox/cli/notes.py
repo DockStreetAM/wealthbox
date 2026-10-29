@@ -6,7 +6,7 @@ from typing import Any
 
 import click
 
-from .common import handle_output, output_options, pass_client
+from .common import handle_output, output_options, parse_set_fields, pass_client
 
 
 @click.group()
@@ -92,9 +92,7 @@ def update_note(
     data: dict[str, Any] = {}
     if content is not None:
         data["content"] = content
-    for fv in set_fields:
-        key, _, value = fv.partition("=")
-        data[key] = value
+    data.update(parse_set_fields(set_fields))
 
     result = client.update_note(note_id, data)
     handle_output(ctx, result, **kwargs)
