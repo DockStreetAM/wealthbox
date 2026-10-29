@@ -3,15 +3,70 @@ wealthbox
 
 Python wrapper for the `Wealthbox CRM API <https://dev.wealthbox.com/>`_.
 
-Usage
------
+Install
+-------
+
+.. code-block:: bash
+
+    pip install wealthbox          # library only
+    pip install "wealthbox[cli]"   # library + the ``wb`` command line tool
+
+Get an API token from WealthBox: Settings → API Access.
+
+Library usage
+-------------
 
 .. code-block:: python
 
+    import os
     from wealthbox import WealthBox
 
-    wb = WealthBox(token="your_access_token")
+    wb = WealthBox(token=os.environ["WEALTHBOX_ACCESS_TOKEN"])
     contacts = wb.get_contacts({"type": "Person"})
+
+The library never looks for a token itself — it does not read
+``WEALTHBOX_ACCESS_TOKEN`` or any ``.env`` file. Load the token however
+you like and pass it as ``token=``. A missing or wrong token shows up as a
+``WealthBoxAPIError`` with status 401/403 that says so.
+
+Command line (``wb``)
+---------------------
+
+Save your token once, in a regular terminal:
+
+.. code-block:: bash
+
+    wb auth set-token        # prompts with hidden input
+    wb auth test             # -> Authenticated as: <your name>
+
+``wb`` looks for the token in this order:
+
+1. the ``WEALTHBOX_ACCESS_TOKEN`` environment variable
+2. a file you name with ``wb --env-file PATH ...``
+3. ``~/.config/wealthbox/credentials.json`` (written by ``wb auth set-token``, owner-only)
+4. ``~/.config/wealthbox/.env``
+
+If there's no terminal to prompt in (scripts, editors, AI agents), use
+``wb auth set-token --from-env PATH`` or pipe the token into
+``wb auth set-token -``.
+
+Upgrading to 0.18
+~~~~~~~~~~~~~~~~~
+
+Before 0.18.0, ``wb`` also read a ``.env`` file in the **current
+directory**. It no longer does, because a cloned project's ``.env`` could
+silently point ``wb`` at a different WealthBox workspace. If you kept your
+token in a project ``.env``, ``wb`` will now say it can't find a token
+(and point at that file). Fix it once with:
+
+.. code-block:: bash
+
+    wb auth set-token --from-env .env
+
+or keep using the file explicitly with ``wb --env-file .env ...``.
+The library itself is unaffected; it never read ``.env`` files.
+
+See ``CHANGELOG.md`` for the other behavior changes in 0.18.0.
 
 Filtering
 ~~~~~~~~~
@@ -47,5 +102,7 @@ repeated query params (``?k=a&k=b`` → ``b`` wins), which is what
 Publishing
 ----------
 
-To publish, first update ``pyproject.toml`` with the new version number,
-then create a new release with the tag ``vx.y.z``.
+Update the version in ``pyproject.toml``, commit, then push a tag
+``vX.Y.Z`` matching that version. GitHub Actions runs the tests, checks
+the tag matches ``pyproject.toml``, and publishes to PyPI via Trusted
+Publishing (no stored token).

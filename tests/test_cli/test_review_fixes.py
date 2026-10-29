@@ -9,6 +9,7 @@ import stat
 import time
 from datetime import datetime, timezone
 
+import click
 import pytest
 import responses
 from click.testing import CliRunner
@@ -459,3 +460,83 @@ class TestTokenHygiene:
         result = split_runner.invoke(cli, ["auth", "set-token", "tok_arg"])
         assert result.exit_code == 0
         assert "shell history" in result.stderr
+
+
+# Upgrade path from pre-0.18 (token in ./.env) must be self-explanatory
+class TestTokenMigrationGuidance:
+    TOKEN = "cwd_env_secret_value_123"
+
+    def _no_creds(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("WEALTHBOX_ACCESS_TOKEN", raising=False)
+        from wealthbox.cli import config
+        creds = tmp_path / "cfg" / "credentials.json"
+        monkeypatch.setattr(config, "get_credentials_path", lambda: creds)
+        return creds
+
+    def test_no_token_with_cwd_env_explains_change(self, runner, monkeypatch, tmp_path):
+        self._no_creds(monkeypatch, tmp_path)
+        (tmp_path / ".env").write_text(f"WEALTHBOX_ACCESS_TOKEN={self.TOKEN}\n")
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(cli, ["contacts", "list", "--json"])
+        assert result.exit_code == 2
+        assert "0.18.0" in result.output
+        assert "--from-env .env" in result.output
+        assert "--env-file .env" in result.output
+        assert self.TOKEN not in result.output
+
+    def test_no_token_without_cwd_env_has_no_migration_note(self, runner, monkeypatch, tmp_path):
+        self._no_creds(monkeypatch, tmp_path)
+        monkeypatch.chdir(tmp_path)
+        result = runner.invoke(cli, ["contacts", "list", "--json"])
+        assert result.exit_code == 2
+        assert "wb auth set-token" in result.output
+        assert "0.18.0" not in result.output
+
+    def test_set_token_from_env(self, split_runner, monkeypatch, tmp_path):
+        creds = self._no_creds(monkeypatch, tmp_path)
+        env = tmp_path / ".env"
+        env.write_text(f"OTHER=1\nWEALTHBOX_ACCESS_TOKEN={self.TOKEN}\n")
+        result = split_runner.invoke(cli, ["auth", "set-token", "--from-env", str(env)])
+        assert result.exit_code == 0, result.stderr
+        assert json.loads(creds.read_text())["access_token"] == self.TOKEN
+        assert self.TOKEN not in result.stdout + result.stderr
+
+    def test_set_token_from_env_missing_file(self, runner, monkeypatch, tmp_path):
+        creds = self._no_creds(monkeypatch, tmp_path)
+        result = runner.invoke(cli, ["auth", "set-token", "--from-env", str(tmp_path / "nope.env")])
+        assert result.exit_code == 4
+        assert "file not found" in result.output
+        assert not creds.exists()
+
+    def test_set_token_from_env_without_key(self, runner, monkeypatch, tmp_path):
+        creds = self._no_creds(monkeypatch, tmp_path)
+        env = tmp_path / ".env"
+        env.write_text("OTHER=1\n")
+        result = runner.invoke(cli, ["auth", "set-token", "--from-env", str(env)])
+        assert result.exit_code == 4
+        assert "no WEALTHBOX_ACCESS_TOKEN" in result.output
+        assert not creds.exists()
+
+    def test_set_token_from_env_and_arg_conflict(self, runner, monkeypatch, tmp_path):
+        creds = self._no_creds(monkeypatch, tmp_path)
+        env = tmp_path / ".env"
+        env.write_text(f"WEALTHBOX_ACCESS_TOKEN={self.TOKEN}\n")
+        result = runner.invoke(cli, ["auth", "set-token", "x", "--from-env", str(env)])
+        assert result.exit_code == 4
+        assert not creds.exists()
+
+    def test_set_token_prompt_without_terminal_explains(self, runner, monkeypatch, tmp_path):
+        creds = self._no_creds(monkeypatch, tmp_path)
+
+        # With no terminal, getpass hits EOF and click.prompt raises Abort
+        # (CliRunner instead re-prompts forever on empty input, so simulate it)
+        def no_tty_prompt(*args, **kwargs):
+            raise click.Abort()
+
+        from wealthbox.cli import auth as auth_mod
+        monkeypatch.setattr(auth_mod.click, "prompt", no_tty_prompt)
+        result = runner.invoke(cli, ["auth", "set-token"])
+        assert result.exit_code == 4
+        assert "no terminal" in result.output
+        assert "--from-env" in result.output
+        assert not creds.exists()

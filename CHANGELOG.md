@@ -5,6 +5,23 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.1] - 2026-10-28
+
+### Added
+- `wb auth set-token --from-env PATH` copies the token from a `.env` file (the one-step
+  fix for anyone whose token lived in a project `.env`, which 0.18.0 stopped reading).
+
+### Changed
+- When no token is found and `./.env` contains `WEALTHBOX_ACCESS_TOKEN`, `wb` now says the
+  file is no longer read automatically and how to fix it.
+- `wb auth set-token` with no terminal (scripts, editors, agents) explains the alternatives
+  instead of just "Aborted!".
+- Library: 401/403 errors say authentication failed and that the library never reads
+  `WEALTHBOX_ACCESS_TOKEN` or `.env` itself; `WealthBox` has a class docstring saying so.
+- README covers install, auth, the `wb` token lookup order and upgrading to 0.18, and is
+  now shown on PyPI.
+- Publishing uses PyPI Trusted Publishing instead of a stored API token.
+
 ## [0.18.0] - 2026-10-28
 
 ### Security

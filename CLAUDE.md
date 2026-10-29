@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Python wrapper library for the Wealthbox CRM API (https://api.crmworkspace.com/v1/). Provides a `WealthBox` class that handles authentication, pagination, and common CRM operations.
 
-**Current version:** 0.18.0
+**Current version:** 0.18.1
 **Next milestone:** 1.0 (see ROADMAP.md)
 
 ## Development Commands
@@ -26,16 +26,18 @@ python -m pytest tests/test_wealthbox.py::TestApiRequest::test_single_page_respo
 
 ## Publishing
 
-Publishing to PyPI is automated via GitHub Actions. To publish:
+Publishing to PyPI is automated via GitHub Actions (`.github/workflows/main.yml`) using **PyPI Trusted Publishing** (OIDC — no stored token). To publish:
 1. Update version in `pyproject.toml`
 2. Run `poetry lock` to update lock file
 3. Commit changes
-4. Create a git tag matching `v*.*.*` (e.g., `v0.13.0`)
-5. Push the tag to trigger the workflow
+4. Create a git tag matching `v*.*.*` (e.g., `v0.13.0`) — it must equal `v` + the pyproject version or the workflow fails
+5. Push the tag; the workflow runs the tests, then builds and publishes
 
 ## Architecture
 
 The core library is a single module (`wealthbox/__init__.py`) with one main class and custom exceptions. A Click-based CLI lives in `wealthbox/cli/` (optional `click` dependency), with tests in `tests/test_cli/`.
+
+**Token handling:** the library takes `token=` only and never reads env vars or `.env`. The CLI resolves it in `wealthbox/cli/config.py::load_token`: `WEALTHBOX_ACCESS_TOKEN` env → `wb --env-file PATH` → `~/.config/wealthbox/credentials.json` (`wb auth set-token`, 0600) → `~/.config/wealthbox/.env`. A `.env` in the **cwd is deliberately not read** (since 0.18.0); `no_token_message()` detects one and tells the user to run `wb auth set-token --from-env .env`.
 
 All request paths raise `WealthBoxAPIError` on 4xx/5xx with the status code, method, endpoint, and response body (truncated to 500 chars) in the exception message — the body is where the API names the offending field, so never swallow it.
 

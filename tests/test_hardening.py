@@ -452,3 +452,33 @@ def test_api_error_carries_status_code():
     with pytest.raises(WealthBoxAPIError) as ei:
         wb.get_contact(5)
     assert ei.value.status_code == 404
+
+
+@responses.activate
+def test_401_hint_when_no_token():
+    wb = WealthBox(token=None, max_retries=0)
+    responses.add(responses.GET, "https://api.crmworkspace.com/v1/me", json={}, status=401)
+    with pytest.raises(WealthBoxAPIError) as ei:
+        wb.api_request("me")
+    msg = str(ei.value)
+    assert "no token was passed to WealthBox(token=...)" in msg
+    assert "does not read WEALTHBOX_ACCESS_TOKEN" in msg
+
+
+@responses.activate
+def test_401_hint_with_bad_token():
+    wb = WealthBox(token="bad", max_retries=0)
+    responses.add(responses.GET, "https://api.crmworkspace.com/v1/me", json={}, status=401)
+    with pytest.raises(WealthBoxAPIError) as ei:
+        wb.api_request("me")
+    assert "check the token passed" in str(ei.value)
+    assert "bad" not in str(ei.value).split("(401)")[1].split(":")[0]
+
+
+@responses.activate
+def test_404_has_no_auth_hint():
+    wb = WealthBox(token="t", max_retries=0)
+    responses.add(responses.GET, "https://api.crmworkspace.com/v1/contacts/5", json={}, status=404)
+    with pytest.raises(WealthBoxAPIError) as ei:
+        wb.get_contact(5)
+    assert "authentication" not in str(ei.value)

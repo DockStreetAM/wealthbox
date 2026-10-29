@@ -68,6 +68,31 @@ def load_token(env_file: str | os.PathLike | None = None) -> str | None:
     return _token_from_env_file(get_config_env_path())
 
 
+def _cwd_env_has_token() -> bool:
+    """True if ./.env defines WEALTHBOX_ACCESS_TOKEN (value is never returned)."""
+    return bool(_token_from_env_file(Path.cwd() / ".env"))
+
+
+def no_token_message() -> str:
+    """Explain why no token was found and how to fix it.
+
+    Calls out the 0.18.0 change explicitly when the user still has a token
+    in ./.env, since that used to be read automatically.
+    """
+    msg = (
+        "No API token found. Save one with `wb auth set-token` (run it in a "
+        "terminal; it prompts with hidden input) or set WEALTHBOX_ACCESS_TOKEN."
+    )
+    if _cwd_env_has_token():
+        msg += (
+            " Note: ./.env contains WEALTHBOX_ACCESS_TOKEN, but since wealthbox "
+            "0.18.0 a .env in the current directory is no longer read "
+            "automatically. Either pass it explicitly (`wb --env-file .env ...`) "
+            "or store it once: `wb auth set-token --from-env .env`."
+        )
+    return msg
+
+
 def save_token(token: str) -> Path:
     """Save token to credentials file (owner read/write only). Returns the path."""
     creds_path = get_credentials_path()

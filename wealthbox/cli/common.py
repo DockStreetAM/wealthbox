@@ -8,7 +8,7 @@ from typing import Any, Callable
 
 import click
 
-from .config import load_token
+from .config import load_token, no_token_message
 from .constants import ExitCode
 from .errors import die, handle_api_error
 
@@ -69,9 +69,7 @@ def pass_client(write: bool = False) -> Callable:
                 if not token:
                     die(
                         "AUTH_REQUIRED",
-                        "No API token found. Run `wb auth set-token` (prompts for the "
-                        "token, keeping it out of shell history) or set "
-                        "WEALTHBOX_ACCESS_TOKEN.",
+                        no_token_message(),
                         ExitCode.AUTH_ERROR,
                         use_json=use_json,
                     )

@@ -154,6 +154,15 @@ def sort_and_limit(
 
 
 class WealthBox:
+    """Client for the WealthBox CRM API.
+
+    ``token`` is your WealthBox API access token (WealthBox → Settings →
+    API Access). The library never looks for a token on its own — it does
+    not read ``WEALTHBOX_ACCESS_TOKEN`` or any ``.env`` file — so load it
+    yourself and pass it in, e.g.
+    ``WealthBox(token=os.environ["WEALTHBOX_ACCESS_TOKEN"])``.
+    Only the ``wb`` CLI has a token lookup chain (see ``wb --help``).
+    """
 
     def __init__(
         self,
@@ -290,8 +299,18 @@ class WealthBox:
             response = res.json()
         except JSONDecodeError:
             response = None
+        hint = ""
+        if res.status_code in (401, 403):
+            hint = (
+                " — authentication failed: "
+                + ("no token was passed to WealthBox(token=...)"
+                   if not self.token else
+                   "check the token passed to WealthBox(token=...)")
+                + ". The library does not read WEALTHBOX_ACCESS_TOKEN or .env "
+                "files itself."
+            )
         raise WealthBoxAPIError(
-            f"WealthBox {method} /{endpoint} failed ({res.status_code}): {body}",
+            f"WealthBox {method} /{endpoint} failed ({res.status_code}){hint}: {body}",
             response=response,
             status_code=res.status_code,
         )
